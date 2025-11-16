@@ -1,0 +1,26 @@
+To use the backtesting system, need to have two docker container
+Docker desktop installed
+1. quantconnect/lean latest
+2. quantconnect/research
+
+install lean (https://www.lean.io/docs/v2/lean-cli/installation/installing-lean-cli)
+pip install --upgrade lean
+
+create project:
+navigate to QuantConnect\
+lean create-project "MyProjectName"
+
+for research:
+lean backtest "MyProjectName"
+lean research "algo-main" --image quantconnect/research:latest
+
+For backtest ui:
+installed as per requirements.txt
+
+then
+
+STEP 1 — Activate the virtual environment:
+cd D:\Algos\QuantConnect\ui
+.\.venv\Scripts\Activate.ps1
+STEP 2 — Run your app
+python app.py (QuantConnect\ui)

@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.pyd
+.ipynb_checkpoints/
+.env
+*.env
+.vscode/
+.idea/
+*.log
+algo-first/backtests/
+algo-main/backtests/
+storage/
+data/

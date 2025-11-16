@@ -1,0 +1,27 @@
+{
+    "algorithm-language": "Python",
+    "parameters": {},
+    "description": "",
+    "local-id": 974760621,
+    "timezone": "Asia/Kolkata",
+    "startDate": "2004-01-23",
+    "endDate": "2025-11-14",
+    "EquityName": "upl",
+    "default-cash": 1000000,
+    "base_resolution": "daily",
+    "timeframe_minutes": 5,
+    "timeframe_days": 1,
+    "warmup_bars": 30,
+    "indicator_params": {
+        "ema_periods": [9, 21, 55],
+        "rsi_period": 14,
+        "bb_period": 20,
+        "bb_std_dev": 2,
+        "atr_period": 14,
+        "vwap_period": 30
+    },
+    "risk_params": {
+        "atr_stop_loss": 3.0
+    },
+    "strategy": "mean_reversion"
+}
