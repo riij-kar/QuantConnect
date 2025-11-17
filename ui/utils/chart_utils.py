@@ -7,7 +7,6 @@ import plotly.graph_objects as go
 __all__ = [
     'extract_series',
     'build_price_from_series',
-    'compute_indicators',
     'build_equity_and_drawdown',
     'get_chart_series'
 ]
@@ -85,22 +84,6 @@ def build_price_from_series(series_map):
         if k.endswith('::Close') or k.lower().endswith('::close'):
             return pd.DataFrame({'close': series_map[k]}).dropna()
     return None
-
-
-def compute_indicators(price_df):
-    if price_df is None or price_df.empty:
-        return {}
-    close = price_df['close'] if 'close' in price_df.columns else price_df.iloc[:, -1]
-    ema9 = close.ewm(span=9, adjust=False).mean()
-    ema21 = close.ewm(span=21, adjust=False).mean()
-    delta = close.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean().replace(0, np.nan)
-    rs = avg_gain / avg_loss
-    rsi14 = 100 - (100 / (1 + rs))
-    return {'EMA9': ema9, 'EMA21': ema21, 'RSI14': rsi14}
 
 
 def build_equity_and_drawdown(series_map):

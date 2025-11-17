@@ -4,11 +4,11 @@
     "description": "",
     "local-id": 974760621,
     "timezone": "Asia/Kolkata",
-    "startDate": "2004-01-23",
-    "endDate": "2025-11-14",
-    "EquityName": "upl",
+    "startDate": "2025-10-17",
+    "endDate": "2025-11-17",
+    "EquityName": "niftyopt",
     "default-cash": 1000000,
-    "base_resolution": "daily",
+    "base_resolution": "minute",
     "timeframe_minutes": 5,
     "timeframe_days": 1,
     "warmup_bars": 30,
@@ -23,5 +23,48 @@
     "risk_params": {
         "atr_stop_loss": 3.0
     },
-    "strategy": "mean_reversion"
+    "strategy": "mean_reversion",
+    "ui": {
+        "timezone": "Asia/Kolkata",
+        "indicators": {
+            "source": "close",
+            "moving-average": [9, 15, 21, 55],
+            "exponential-moving-average" : [9, 21, 55],
+            "bollinger-bands": {
+                "period": 20,
+                "std_dev": 2,
+                "ma_type": "SMA",
+                "upper_band": true,
+                "lower_band": true,
+                "middle_band": true,
+                "mult": 2
+            },
+            "atr": {
+                "period": 14,
+                "ma_type": "SMA"
+            },
+            "vwap": {
+                "period": 30,
+                "source": "hlc3"
+            },
+            "supertrend": {
+                "period": 10,
+                "multiplier": 3.0,
+                "timeframe": "chart"
+            },
+            "rsi": {
+                "period": 14,
+                "overbought": 70,
+                "oversold": 30
+            },
+            "macd": {
+                "source": "close",
+                "fast_period": 12,
+                "slow_period": 26,
+                "signal_period": 9,
+                "oscillator_ma_type": "EMA",
+                "signal_line_ma_type": "EMA"
+            }
+        }
+    }
 }

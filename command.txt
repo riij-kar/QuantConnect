@@ -9,6 +9,8 @@ pip install --upgrade lean
 create project:
 navigate to QuantConnect\
 lean create-project "MyProjectName"
+for backtest:
+lean backtest "algo-main"
 
 for research:
 lean backtest "MyProjectName"
@@ -24,3 +26,9 @@ cd D:\Algos\QuantConnect\ui
 .\.venv\Scripts\Activate.ps1
 STEP 2 — Run your app
 python app.py (QuantConnect\ui)
+
+
+
+install of ta-lib of two step process
+https://github.com/ta-lib/ta-lib/releases/download/v0.6.4/ta-lib-0.6.4-windows-x86_64.msi
+pip install TA-Lib

@@ -1,16 +1,17 @@
 import os, glob, json, pandas as pd, numpy as np
+from copy import deepcopy
 from datetime import datetime
 from dash import Dash, dcc, html, Input, Output, State, dash_table
-from typing import Any, List
+from typing import Any, Dict, List, Optional
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from utils.chart_utils import (
     extract_series,
     build_price_from_series,
-    compute_indicators,
     build_equity_and_drawdown,
     get_chart_series
 )
+from utils.visual_indicators import compute_visual_indicators, IndicatorBundle
 from utils.trade_mapper import (
     load_all_json,
     parse_order_events,
@@ -32,6 +33,20 @@ WORKSPACE_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 
 # Candidate project folders (contain backtests folders)
 EXCLUDE_FOLDERS = {"data", "storage", "__pycache__", "ui"}
+
+INDICATOR_CHECKLIST_OPTIONS = [
+    ("sma", "Simple MA"),
+    ("ema", "Exponential MA"),
+    ("bbands", "Bollinger Bands"),
+    ("supertrend", "Supertrend"),
+    ("vwap", "VWAP"),
+    ("atr", "ATR"),
+    ("rsi", "RSI"),
+    ("macd", "MACD"),
+]
+
+DEFAULT_SMA_PERIOD_OPTIONS = [5, 8, 9, 10, 12, 15, 21, 34, 55, 89, 144, 200]
+DEFAULT_EMA_PERIOD_OPTIONS = [5, 8, 9, 12, 21, 34, 55, 89, 144, 200]
 
 app = Dash(__name__, suppress_callback_exceptions=True)
 app.title = "QC Local Dashboard"
@@ -177,22 +192,6 @@ def build_price_from_series(series_map):
             return pd.DataFrame({'close': series_map[k]}).dropna()
     return None
 
-# Compute a small set of technical indicators (EMA9, EMA21, RSI14) from a price DataFrame.
-def compute_indicators(price_df):
-    if price_df is None or price_df.empty:
-        return {}
-    close = price_df['close'] if 'close' in price_df.columns else price_df.iloc[:, -1]
-    ema9 = close.ewm(span=9, adjust=False).mean()
-    ema21 = close.ewm(span=21, adjust=False).mean()
-    delta = close.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean().replace(0, np.nan)
-    rs = avg_gain / avg_loss
-    rsi14 = 100 - (100 / (1 + rs))
-    return {'EMA9': ema9, 'EMA21': ema21, 'RSI14': rsi14}
-
 # Build equity (OHLC when available), drawdown, and percent returns from extracted series.
 def build_equity_and_drawdown(series_map):
     """Return equity as OHLC DataFrame when available, else Series; also drawdown and returns%.
@@ -300,6 +299,32 @@ def _stat_color(key: str, value):
     if v is not None and v < 0:
         return 'red'
     return 'inherit'
+
+
+def _coerce_period_list(raw_values) -> List[int]:
+    """Convert user input (dropdown selections or comma strings) into a list of unique ints."""
+    values: List[int] = []
+    if raw_values is None:
+        return values
+    if isinstance(raw_values, (int, float)):
+        raw_values = [raw_values]
+    elif isinstance(raw_values, str):
+        raw_values = [raw_values]
+    for item in raw_values:
+        if item is None:
+            continue
+        if isinstance(item, (list, tuple)):
+            tokens = item
+        else:
+            tokens = str(item).replace(',', ' ').split()
+        for token in tokens:
+            if not token:
+                continue
+            try:
+                values.append(int(float(token)))
+            except (TypeError, ValueError):
+                continue
+    return sorted(set(values))
 
 # Render statistics as inline spans with spacing and heuristic coloring.
 def _render_stats(stats: dict):
@@ -418,110 +443,210 @@ def parse_trades(perf_jsons: dict) -> pd.DataFrame:
 
 # Build the main multi-panel Plotly figure (Price, Equity, Returns, Drawdown, RSI)
 # and mark trade entries/exits when available.
-def build_figure(price_df, indicators, equity, drawdown, returns, trades_df, expected_interval=None):
-    # Limit rendering load to keep scrolling smooth
-    # Use all points by default; set MAX_PRICE_POINTS>0 to limit for performance
+def build_figure(price_df, indicator_bundle: Optional[IndicatorBundle], equity, drawdown, returns, trades_df, expected_interval=None):
     MAX_PRICE_POINTS = int(os.environ.get('MAX_PRICE_POINTS', '0'))
     MAX_TRADE_MARKERS = int(os.environ.get('MAX_TRADE_MARKERS', '400'))
 
-    gap_threshold = None
-    if expected_interval is not None:
+    bundle = indicator_bundle or IndicatorBundle.empty()
+    overlays_raw = bundle.overlays or {}
+    oscillators_raw = bundle.oscillators or {}
+
+    def _normalize_timestamp(value):
         try:
-            gap_threshold = expected_interval * 3
+            ts = pd.Timestamp(value)
         except Exception:
-            gap_threshold = None
+            return None
+        if ts.tzinfo is not None:
+            ts = pd.Timestamp(ts.to_pydatetime().replace(tzinfo=None))
+        return ts
 
-    def _with_gap_breaks(series):
-        if series is None:
-            return [], []
-        if gap_threshold is None or len(series) < 2:
-            return list(series.index), list(series.values)
-        xs = []
-        ys = []
-        prev_ts = None
-        for ts, val in series.items():
-            if prev_ts is not None and (ts - prev_ts) > gap_threshold:
-                xs.append(None)
-                ys.append(None)
-            xs.append(ts)
-            ys.append(val)
-            prev_ts = ts
-        return xs, ys
-
-    # Slice price to recent window
     price_plot = None
+    tmin = tmax = None
     if price_df is not None and not price_df.empty:
         if MAX_PRICE_POINTS and MAX_PRICE_POINTS > 0 and len(price_df) > MAX_PRICE_POINTS:
             price_plot = price_df.tail(MAX_PRICE_POINTS)
         else:
             price_plot = price_df
         tmin, tmax = price_plot.index.min(), price_plot.index.max()
-    else:
-        tmin = tmax = None
 
-    # Slice indicators into same time window
-    indicators_plot = {}
-    if indicators:
-        for k, ser in indicators.items():
-            try:
-                indicators_plot[k] = ser.loc[tmin:tmax] if tmin is not None else ser
-            except Exception:
-                indicators_plot[k] = ser
+    if tmin is not None:
+        tmin = _normalize_timestamp(tmin)
+    if tmax is not None:
+        tmax = _normalize_timestamp(tmax)
 
-    # Slice equity/returns/drawdown to window
-    def _slice(obj):
+    if tmin is None:
+        for series_obj in overlays_raw.values():
+            if isinstance(series_obj, pd.Series) and not series_obj.dropna().empty:
+                tmin, tmax = series_obj.index.min(), series_obj.index.max()
+                break
+    if tmin is not None:
+        tmin = _normalize_timestamp(tmin)
+    if tmax is not None:
+        tmax = _normalize_timestamp(tmax)
+
+    if tmin is None:
+        for spec in oscillators_raw.values():
+            if not isinstance(spec, dict):
+                continue
+            found_index = None
+            for value in spec.values():
+                if isinstance(value, pd.Series) and not value.dropna().empty:
+                    found_index = value.index
+                    break
+            if found_index is not None:
+                tmin, tmax = found_index.min(), found_index.max()
+                break
+    if tmin is not None:
+        tmin = _normalize_timestamp(tmin)
+    if tmax is not None:
+        tmax = _normalize_timestamp(tmax)
+
+    def _slice_series(series_obj: Optional[pd.Series]) -> Optional[pd.Series]:
+        if series_obj is None:
+            return None
+        try:
+            if tmin is not None and tmax is not None:
+                return series_obj.loc[tmin:tmax]
+            return series_obj
+        except Exception:
+            return series_obj
+
+    overlays_plot = {}
+    for name, series_obj in overlays_raw.items():
+        if not isinstance(series_obj, pd.Series):
+            continue
+        sliced = _slice_series(series_obj)
+        if sliced is None or sliced.dropna().empty:
+            continue
+        overlays_plot[name] = sliced
+
+    oscillator_plot = []
+    for name, spec in oscillators_raw.items():
+        if not isinstance(spec, dict):
+            continue
+        plot_spec = {}
+        for key, value in spec.items():
+            if isinstance(value, pd.Series):
+                plot_spec[key] = _slice_series(value)
+            else:
+                plot_spec[key] = value
+        has_series = any(
+            isinstance(value, pd.Series) and not value.dropna().empty
+            for key, value in plot_spec.items()
+            if key != 'levels'
+        )
+        if not has_series:
+            continue
+        oscillator_plot.append((name, plot_spec))
+
+    def _slice_frame(obj):
         if obj is None:
             return None
         try:
-            return obj.loc[tmin:tmax] if tmin is not None else obj
+            if tmin is not None and tmax is not None:
+                return obj.loc[tmin:tmax]
+            return obj
         except Exception:
             return obj
-    equity_plot = _slice(equity)
-    drawdown_plot = _slice(drawdown)
-    returns_plot = _slice(returns)
 
-    # Filter trades to window and cap markers
+    equity_plot = _slice_frame(equity)
+    drawdown_plot = _slice_frame(drawdown)
+    returns_plot = _slice_frame(returns)
+
     trades_plot = trades_df
-    if trades_df is not None and not trades_df.empty and tmin is not None:
+    if trades_df is not None and not trades_df.empty and tmin is not None and tmax is not None:
         def _within(ts):
             try:
-                return (pd.to_datetime(ts) >= tmin) and (pd.to_datetime(ts) <= tmax)
+                val = pd.to_datetime(ts)
             except Exception:
                 return False
+            if val is pd.NaT:
+                return False
+            norm = _normalize_timestamp(val)
+            if norm is None:
+                return False
+            return (norm >= tmin) and (norm <= tmax)
+
         trades_plot = trades_df[trades_df.apply(lambda r: _within(r.get('entryTime')) or _within(r.get('exitTime')), axis=1)]
         if len(trades_plot) > MAX_TRADE_MARKERS:
             trades_plot = trades_plot.tail(MAX_TRADE_MARKERS)
 
-    # 6 panels: Price & Indicators, Volume, RSI, Equity, Return %, Drawdown
+    axis_values: set[pd.Timestamp] = set()
+
+    def _extend_axis(idx_like):
+        if idx_like is None:
+            return
+        for ts in idx_like:
+            norm = _normalize_timestamp(ts)
+            if norm is not None:
+                axis_values.add(norm)
+
+    if price_plot is not None:
+        _extend_axis(price_plot.index)
+    for ser in overlays_plot.values():
+        _extend_axis(getattr(ser, 'index', None))
+    for _, spec in oscillator_plot:
+        for value in spec.values():
+            if isinstance(value, pd.Series):
+                _extend_axis(value.index)
+    _extend_axis(getattr(equity_plot, 'index', None))
+    _extend_axis(getattr(drawdown_plot, 'index', None))
+    _extend_axis(getattr(returns_plot, 'index', None))
+    if trades_plot is not None and not trades_plot.empty:
+        if 'entryTime' in trades_plot.columns:
+            _extend_axis(pd.to_datetime(trades_plot['entryTime'], errors='coerce'))
+        if 'exitTime' in trades_plot.columns:
+            _extend_axis(pd.to_datetime(trades_plot['exitTime'], errors='coerce'))
+
+    axis_list = sorted(axis_values)
+    axis_lookup = {ts: idx for idx, ts in enumerate(axis_list)}
+
+    def _map_index(idx_like):
+        mapped = []
+        for ts in idx_like:
+            norm = _normalize_timestamp(ts)
+            if norm is None:
+                mapped.append(None)
+            else:
+                mapped.append(axis_lookup.get(norm))
+        return mapped
+
+    def _format_tick(ts: pd.Timestamp) -> str:
+        if expected_interval is not None and expected_interval >= pd.Timedelta(days=1):
+            return ts.strftime('%b %d')
+        return ts.strftime('%b %d\n%H:%M')
+
+    oscillator_count = len(oscillator_plot)
+    row_heights = [0.32, 0.12] + ([0.16] * oscillator_count) + [0.2, 0.12, 0.08]
+    subplot_titles = ['Price & Overlays', 'Volume'] + [name for name, _ in oscillator_plot] + ['Equity Curve', 'Return %', 'Drawdown']
+    total_rows = len(row_heights)
     fig = make_subplots(
-        rows=6,
+        rows=total_rows,
         cols=1,
         shared_xaxes=True,
-        row_heights=[0.32, 0.12, 0.18, 0.2, 0.12, 0.06],
+        row_heights=row_heights,
         vertical_spacing=0.03,
-        specs=[[{}], [{}], [{}], [{}], [{}], [{}]],
-        subplot_titles=(
-            'Price & Indicators',
-            'Volume',
-            'RSI (14)',
-            'Equity Curve',
-            'Return %',
-            'Drawdown'
-        )
+        specs=[[{}] for _ in range(total_rows)],
+        subplot_titles=tuple(subplot_titles)
     )
 
     legend_seen: set[str] = set()
 
     def _add_trace(trace, *, row: int, col: int, secondary_y: bool = False):
         name = getattr(trace, 'name', None)
-        if name:
+        if name and trace.showlegend is not False:
             show = name not in legend_seen
             trace.showlegend = show
             if show:
                 legend_seen.add(name)
         fig.add_trace(trace, row=row, col=col, secondary_y=secondary_y)
 
-    # Price (row 1)
+    price_row = 1
+    volume_row = 2
+    equity_row = 3 + oscillator_count
+    returns_row = equity_row + 1
+    drawdown_row = returns_row + 1
+
     if price_plot is not None:
         if all(c in price_plot.columns for c in ['open', 'high', 'low', 'close']):
             hover_text = [
@@ -540,8 +665,9 @@ def build_figure(price_df, indicators, equity, drawdown, returns, trades_df, exp
                     price_plot['close']
                 )
             ]
+            price_positions = _map_index(price_plot.index)
             price_trace = go.Candlestick(
-                x=price_plot.index,
+                x=price_positions,
                 open=price_plot['open'],
                 high=price_plot['high'],
                 low=price_plot['low'],
@@ -550,11 +676,12 @@ def build_figure(price_df, indicators, equity, drawdown, returns, trades_df, exp
                 hovertext=hover_text,
                 hoverinfo='text'
             )
-            _add_trace(price_trace, row=1, col=1)
+            _add_trace(price_trace, row=price_row, col=1)
         else:
             yser = price_plot['close'] if 'close' in price_plot.columns else price_plot.iloc[:, -1]
             trace_cls = go.Scattergl if len(yser) > 2000 else go.Scatter
-            px, py = _with_gap_breaks(yser)
+            px = _map_index(yser.index)
+            py = list(yser.values)
             price_line = trace_cls(
                 x=px,
                 y=py,
@@ -563,107 +690,166 @@ def build_figure(price_df, indicators, equity, drawdown, returns, trades_df, exp
                 hovertemplate='Time: %{x|%b %d %H:%M}<br>Price: %{y}<extra></extra>',
                 connectgaps=False
             )
-            _add_trace(price_line, row=1, col=1)
+            _add_trace(price_line, row=price_row, col=1)
 
         if 'volume' in price_plot.columns:
             vol = price_plot['volume'].fillna(0)
+            vol_x = _map_index(vol.index)
             if all(col in price_plot.columns for col in ['open', 'close']):
                 colors = ['#2ca02c' if c >= o else '#d62728' for o, c in zip(price_plot['open'], price_plot['close'])]
             else:
                 colors = ['#2ca02c'] * len(vol)
             volume_bar = go.Bar(
-                x=vol.index,
+                x=vol_x,
                 y=vol.values,
                 marker=dict(color=colors, line=dict(width=0)),
                 name='Volume',
                 opacity=0.7
             )
-            _add_trace(volume_bar, row=2, col=1)
+            _add_trace(volume_bar, row=volume_row, col=1)
 
-    # Indicators (exclude RSI14 from price panel)
-    for name, ser in indicators_plot.items():
-        if name == 'RSI14':
+    for name, ser in overlays_plot.items():
+        if ser is None or ser.empty:
             continue
         trace_cls = go.Scattergl if len(ser) > 3000 else go.Scatter
-        ix, iy = _with_gap_breaks(ser)
-        indicator_trace = trace_cls(
-            x=ix,
-            y=iy,
+        overlay_trace = trace_cls(
+            x=_map_index(ser.index),
+            y=ser.values,
             mode='lines',
             name=name,
             connectgaps=False
         )
-        _add_trace(indicator_trace, row=1, col=1)
+        _add_trace(overlay_trace, row=price_row, col=1)
 
-    # Trades markers (still on price panel)
     if trades_plot is not None and not trades_plot.empty:
         for _, r in trades_plot.iterrows():
             if 'entryTime' in r and 'entryPrice' in r:
-                entry_trace = go.Scatter(
-                    x=[r['entryTime']],
-                    y=[r.get('entryPrice')],
-                    mode='markers',
-                    marker_symbol='triangle-up',
-                    marker_color='green',
-                    marker_size=10,
-                    name='Entry'
-                )
-                _add_trace(entry_trace, row=1, col=1)
+                entry_x = _normalize_timestamp(r['entryTime'])
+                if entry_x in axis_lookup:
+                    entry_trace = go.Scatter(
+                        x=[axis_lookup[entry_x]],
+                        y=[r.get('entryPrice')],
+                        mode='markers',
+                        marker_symbol='triangle-up',
+                        marker_color='green',
+                        marker_size=10,
+                        name='Entry'
+                    )
+                    _add_trace(entry_trace, row=price_row, col=1)
             if 'exitTime' in r and 'exitPrice' in r:
-                exit_trace = go.Scatter(
-                    x=[r['exitTime']],
-                    y=[r.get('exitPrice')],
-                    mode='markers',
-                    marker_symbol='x',
-                    marker_color='red',
-                    marker_size=9,
-                    name='Exit'
+                exit_x = _normalize_timestamp(r['exitTime'])
+                if exit_x in axis_lookup:
+                    exit_trace = go.Scatter(
+                        x=[axis_lookup[exit_x]],
+                        y=[r.get('exitPrice')],
+                        mode='markers',
+                        marker_symbol='x',
+                        marker_color='red',
+                        marker_size=9,
+                        name='Exit'
+                    )
+                    _add_trace(exit_trace, row=price_row, col=1)
+
+    for idx, (name, spec) in enumerate(oscillator_plot):
+        row_index = 3 + idx
+        otype = spec.get('type')
+        if otype == 'line':
+            series = spec.get('series')
+            if isinstance(series, pd.Series) and not series.empty:
+                trace_cls = go.Scattergl if len(series) > 3000 else go.Scatter
+                osc_trace = trace_cls(
+                    x=_map_index(series.index),
+                    y=series.values,
+                    mode='lines',
+                    name=name,
+                    connectgaps=False
                 )
-                _add_trace(exit_trace, row=1, col=1)
+                _add_trace(osc_trace, row=row_index, col=1)
+                for level_label, level_value in spec.get('levels', []) or []:
+                    if level_value is None:
+                        continue
+                    level_trace = go.Scatter(
+                        x=_map_index(series.index),
+                        y=[float(level_value)] * len(series),
+                        mode='lines',
+                        name=f"{name} {level_label}",
+                        line=dict(color='#999999', width=1, dash='dash'),
+                        hoverinfo='skip'
+                    )
+                    level_trace.showlegend = False
+                    _add_trace(level_trace, row=row_index, col=1)
+        elif otype == 'macd':
+            hist = spec.get('hist')
+            macd_series = spec.get('macd')
+            signal_series = spec.get('signal')
+            if isinstance(hist, pd.Series) and not hist.empty:
+                colors = ['#2ca02c' if v >= 0 else '#d62728' for v in hist.values]
+                hist_trace = go.Bar(
+                    x=_map_index(hist.index),
+                    y=hist.values,
+                    marker=dict(color=colors, line=dict(width=0)),
+                    opacity=0.65,
+                    name=f"{name} Hist"
+                )
+                hist_trace.showlegend = False
+                _add_trace(hist_trace, row=row_index, col=1)
+            if isinstance(macd_series, pd.Series) and not macd_series.empty:
+                macd_trace = go.Scatter(
+                    x=_map_index(macd_series.index),
+                    y=macd_series.values,
+                    mode='lines',
+                    name=f"{name} MACD",
+                    line=dict(width=1.8)
+                )
+                _add_trace(macd_trace, row=row_index, col=1)
+            if isinstance(signal_series, pd.Series) and not signal_series.empty:
+                signal_trace = go.Scatter(
+                    x=_map_index(signal_series.index),
+                    y=signal_series.values,
+                    mode='lines',
+                    name=f"{name} Signal",
+                    line=dict(width=1.4, dash='dash')
+                )
+                _add_trace(signal_trace, row=row_index, col=1)
 
-    # RSI panel (row 3)
-    if 'RSI14' in indicators_plot:
-        rsi = indicators_plot['RSI14']
-        trace_cls = go.Scattergl if len(rsi) > 3000 else go.Scatter
-        rx, ry = _with_gap_breaks(rsi)
-        rsi_trace = trace_cls(x=rx, y=ry, mode='lines', name='RSI14', connectgaps=False)
-        _add_trace(rsi_trace, row=3, col=1)
-
-    # Equity panel (row 4)
     if equity_plot is not None:
         if isinstance(equity_plot, pd.DataFrame) and all(c in equity_plot.columns for c in ['open', 'high', 'low', 'close']):
+            equity_positions = _map_index(equity_plot.index)
             equity_candle = go.Candlestick(
-                x=equity_plot.index,
+                x=equity_positions,
                 open=equity_plot['open'],
                 high=equity_plot['high'],
                 low=equity_plot['low'],
                 close=equity_plot['close'],
                 name='Equity OHLC'
             )
-            _add_trace(equity_candle, row=4, col=1)
+            _add_trace(equity_candle, row=equity_row, col=1)
         else:
             ser = equity_plot
-            eq_trace = go.Scattergl(x=ser.index, y=getattr(ser, 'values', ser), mode='lines', name='Equity')
-            _add_trace(eq_trace, row=4, col=1)
+            eq_trace = go.Scattergl(
+                x=_map_index(ser.index),
+                y=getattr(ser, 'values', ser),
+                mode='lines',
+                name='Equity'
+            )
+            _add_trace(eq_trace, row=equity_row, col=1)
 
-    # Returns panel (row 5)
     if returns_plot is not None:
         ret_values = returns_plot.fillna(0)
         colors = ['#2ca02c' if v >= 0 else '#d62728' for v in ret_values.values]
         returns_bar = go.Bar(
-            x=ret_values.index,
+            x=_map_index(ret_values.index),
             y=ret_values.values,
             marker=dict(color=colors, line=dict(width=0)),
             opacity=0.75,
             name='Return %'
         )
-        _add_trace(returns_bar, row=5, col=1)
+        _add_trace(returns_bar, row=returns_row, col=1)
 
-    # Drawdown panel (row 6)
     if drawdown_plot is not None:
         dd = drawdown_plot.fillna(0)
         drawdown_line = go.Scatter(
-            x=dd.index,
+            x=_map_index(dd.index),
             y=dd.values,
             mode='lines',
             name='Drawdown',
@@ -672,10 +858,11 @@ def build_figure(price_df, indicators, equity, drawdown, returns, trades_df, exp
             fillcolor='rgba(148, 103, 189, 0.25)',
             hovertemplate='Drawdown: %{y:.2%}<extra></extra>'
         )
-        _add_trace(drawdown_line, row=6, col=1)
+        _add_trace(drawdown_line, row=drawdown_row, col=1)
 
+    figure_height = max(900, 240 * total_rows + 120)
     fig.update_layout(
-        height=1550,
+        height=figure_height,
         title='Backtest Visualization',
         legend_orientation='h',
         showlegend=True,
@@ -683,44 +870,54 @@ def build_figure(price_df, indicators, equity, drawdown, returns, trades_df, exp
         hovermode='x unified',
         margin=dict(t=90, l=60, r=40, b=90)
     )
-    fig.update_yaxes(title_text='Volume', row=2, col=1)
-    fig.update_yaxes(title_text='RSI (14)', row=3, col=1)
-    fig.update_yaxes(title_text='Equity', row=4, col=1)
-    fig.update_yaxes(title_text='Return %', row=5, col=1)
-    fig.update_yaxes(title_text='Drawdown', row=6, col=1, tickformat='.1%')
+    fig.update_yaxes(title_text='Volume', row=volume_row, col=1)
+    for idx, (name, _) in enumerate(oscillator_plot):
+        fig.update_yaxes(title_text=name, row=3 + idx, col=1)
+    fig.update_yaxes(title_text='Equity', row=equity_row, col=1)
+    fig.update_yaxes(title_text='Return %', row=returns_row, col=1)
+    fig.update_yaxes(title_text='Drawdown', row=drawdown_row, col=1, tickformat='.1%')
 
-    # Force the x-axis range to the actual price window so earliest data (e.g., Jul 14)
-    # is included, and show tidy tick labels.
     try:
-        if price_plot is not None and len(price_plot.index) > 0:
-            _xmin = price_plot.index.min()
-            _xmax = price_plot.index.max()
-            base_axis_kwargs = dict(type='date', range=[_xmin, _xmax], automargin=True)
-            for r in (1, 2, 3, 4, 5, 6):
+        total_points = len(axis_list)
+        if total_points > 0:
+            max_ticks = 12
+            step = max(1, total_points // max_ticks)
+            tick_positions = list(range(0, total_points, step))
+            if (total_points - 1) not in tick_positions:
+                tick_positions.append(total_points - 1)
+            tick_text = [_format_tick(axis_list[i]) for i in tick_positions]
+
+            base_axis_kwargs = dict(
+                type='linear',
+                range=[-0.5, total_points - 0.5],
+                tickmode='array',
+                tickvals=tick_positions,
+                ticktext=tick_text,
+                automargin=True
+            )
+            for r in range(1, total_rows + 1):
                 fig.update_xaxes(row=r, col=1, **base_axis_kwargs)
             fig.update_xaxes(
-                row=1,
+                row=price_row,
                 col=1,
                 showticklabels=True,
-                tickformat='%b %d<br>%H:%M',
-                tickangle=0,
                 ticklabelposition='outside top',
                 ticks='inside',
                 ticklen=4,
                 tickfont=dict(size=10)
             )
-            for r in (2, 3, 4, 5):
+            for r in range(1, total_rows + 1):
+                if r in (price_row, drawdown_row):
+                    continue
                 fig.update_xaxes(row=r, col=1, showticklabels=False)
             fig.update_xaxes(
-                row=6,
+                row=drawdown_row,
                 col=1,
                 showticklabels=True,
-                tickformat='%b %d<br>%H:%M',
                 tickangle=0,
                 tickfont=dict(size=11)
             )
     except Exception:
-        # Non-fatal; fall back to Plotly's autorange
         pass
     return fig
 
@@ -793,7 +990,44 @@ def get_main_layout():
                 style={'width':'150px', 'height':'38px'}
             ),
             html.Button('Load Chart', id='resample-btn', n_clicks=0, style={'marginLeft':'8px'})
-        ], style={'display':'flex', 'alignItems':'center', 'justifyContent':'flex-end', 'gap':'10px', 'margin':'0 10px 12px 10px'}),
+        ], style={'display':'flex', 'alignItems':'center', 'justifyContent':'flex-end', 'gap':'10px', 'margin':'0 10px 6px 10px'}),
+        html.Div([
+            html.Div('Indicators', style={'fontWeight':'600', 'color':'#444'}),
+            dcc.Checklist(
+                id='indicator-checklist',
+                options=[{'label': label, 'value': value} for value, label in INDICATOR_CHECKLIST_OPTIONS],
+                value=[],
+                inputStyle={'marginRight':'4px'},
+                labelStyle={'marginRight':'12px', 'marginBottom':'4px'},
+                style={'display':'flex', 'flexWrap':'wrap'}
+            ),
+            html.Div([
+                html.Div([
+                    html.Label('SMA Periods', style={'color':'#555', 'fontSize':'12px'}),
+                    dcc.Dropdown(
+                        id='indicator-sma-periods',
+                        options=[{'label': str(p), 'value': str(p)} for p in DEFAULT_SMA_PERIOD_OPTIONS],
+                        value=[],
+                        multi=True,
+                        placeholder='Select SMA periods',
+                        clearable=True,
+                        style={'minWidth':'160px'}
+                    )
+                ], style={'minWidth':'180px'}),
+                html.Div([
+                    html.Label('EMA Periods', style={'color':'#555', 'fontSize':'12px'}),
+                    dcc.Dropdown(
+                        id='indicator-ema-periods',
+                        options=[{'label': str(p), 'value': str(p)} for p in DEFAULT_EMA_PERIOD_OPTIONS],
+                        value=[],
+                        multi=True,
+                        placeholder='Select EMA periods',
+                        clearable=True,
+                        style={'minWidth':'160px'}
+                    )
+                ], style={'minWidth':'180px'}),
+            ], style={'display':'flex', 'flexWrap':'wrap', 'gap':'16px', 'marginTop':'6px'})
+        ], style={'margin':'0 10px 16px 10px', 'padding':'10px', 'border':'1px solid #eee', 'borderRadius':'6px', 'background':'#fafafa'}),
         dcc.Loading(dcc.Graph(id='chart'), type='default'),
         html.Div(id='extra-charts', style={'padding':'0 10px'}),
         html.H4('Trades', style={'margin':'10px'}),
@@ -835,9 +1069,12 @@ def update_backtests(project_path):
     Input('backtest-dd','value'),
     Input('resample-btn','n_clicks'),
     State('resample-value','value'),
-    State('resample-unit','value')
+    State('resample-unit','value'),
+    State('indicator-checklist','value'),
+    State('indicator-sma-periods','value'),
+    State('indicator-ema-periods','value')
 )
-def update_visual(backtest_folder, _resample_clicks, resample_value, resample_unit):
+def update_visual(backtest_folder, _resample_clicks, resample_value, resample_unit, indicator_selection, sma_period_values, ema_period_values):
     if not backtest_folder:
         return {}, '', '', [], ''
     jsons = load_backtest_folder(backtest_folder)
@@ -852,6 +1089,17 @@ def update_visual(backtest_folder, _resample_clicks, resample_value, resample_un
     # Always load OHLCV from CSV using project config EquityName
     project_path = os.path.dirname(os.path.dirname(backtest_folder))
     data_root = os.path.join(WORKSPACE_ROOT, 'data')
+    indicator_config: Dict[str, Any] = {}
+    indicator_load_messages: List[str] = []
+    config_path = os.path.join(project_path, 'config.json')
+    try:
+        with open(config_path, 'r', encoding='utf-8') as cfg_file:
+            project_config = json.load(cfg_file)
+        indicator_config = ((project_config.get('ui') or {}).get('indicators')) or {}
+    except FileNotFoundError:
+        indicator_load_messages.append("Indicator config not found; overlays/oscillators disabled.")
+    except Exception as exc:
+        indicator_load_messages.append(f"Indicator config load error: {exc}")
     price_df = None
     price_source_note = None
     price_diag = {}
@@ -859,7 +1107,7 @@ def update_visual(backtest_folder, _resample_clicks, resample_value, resample_un
     freq_label = format_frequency_label(freq_value, freq_unit)
     expected_interval = frequency_to_timedelta(freq_value, freq_unit)
     try:
-        csv_df, _csv_path, price_diag = load_ohlcv_from_csv(project_path, data_root)
+        csv_df, _csv_path, price_diag = load_ohlcv_from_csv(project_path, data_root, backtest_folder)
         print('[app] Price loader diagnostics:', csv_df.head(10))
     except Exception as e:
         csv_df, _csv_path, price_diag = None, None, {'error': f'Loader exception: {e}'}
@@ -875,7 +1123,77 @@ def update_visual(backtest_folder, _resample_clicks, resample_value, resample_un
         if built_price is not None and not built_price.empty:
             price_df = resample_ohlcv(built_price, freq_value, freq_unit)
             price_source_note = "Price source: backtest chart series"
-    indicators = compute_indicators(price_df)
+    base_indicator_config = indicator_config or {}
+    selected_indicator_config: Dict[str, Any] = {}
+    user_indicator_messages: List[str] = []
+    selected_keys = set(indicator_selection or [])
+
+    source_value = base_indicator_config.get('source')
+    if source_value and selected_keys:
+        selected_indicator_config['source'] = source_value
+
+    if 'sma' in selected_keys:
+        sma_periods = _coerce_period_list(sma_period_values)
+        if not sma_periods:
+            sma_periods = _coerce_period_list(base_indicator_config.get('moving-average'))
+        if sma_periods:
+            selected_indicator_config['moving-average'] = sma_periods
+        else:
+            user_indicator_messages.append('Simple MA selected but no periods provided; skipping.')
+
+    if 'ema' in selected_keys:
+        ema_periods = _coerce_period_list(ema_period_values)
+        if not ema_periods:
+            ema_periods = _coerce_period_list(base_indicator_config.get('exponential-moving-average'))
+        if ema_periods:
+            selected_indicator_config['exponential-moving-average'] = ema_periods
+        else:
+            user_indicator_messages.append('Exponential MA selected but no periods provided; skipping.')
+
+    if 'bbands' in selected_keys:
+        base_bb = base_indicator_config.get('bollinger-bands')
+        if isinstance(base_bb, dict):
+            selected_indicator_config['bollinger-bands'] = deepcopy(base_bb)
+        else:
+            user_indicator_messages.append('Bollinger Bands config missing; skipping.')
+
+    if 'supertrend' in selected_keys:
+        base_supertrend = base_indicator_config.get('supertrend')
+        if isinstance(base_supertrend, dict):
+            selected_indicator_config['supertrend'] = deepcopy(base_supertrend)
+        else:
+            user_indicator_messages.append('Supertrend config missing; skipping.')
+
+    if 'vwap' in selected_keys:
+        base_vwap = base_indicator_config.get('vwap')
+        if isinstance(base_vwap, dict):
+            selected_indicator_config['vwap'] = deepcopy(base_vwap)
+        else:
+            user_indicator_messages.append('VWAP config missing; skipping.')
+
+    if 'atr' in selected_keys:
+        base_atr = base_indicator_config.get('atr')
+        if isinstance(base_atr, dict):
+            selected_indicator_config['atr'] = deepcopy(base_atr)
+        else:
+            user_indicator_messages.append('ATR config missing; skipping.')
+
+    if 'rsi' in selected_keys:
+        base_rsi = base_indicator_config.get('rsi')
+        if isinstance(base_rsi, dict):
+            selected_indicator_config['rsi'] = deepcopy(base_rsi)
+        else:
+            user_indicator_messages.append('RSI config missing; skipping.')
+
+    if 'macd' in selected_keys:
+        base_macd = base_indicator_config.get('macd')
+        if isinstance(base_macd, dict):
+            selected_indicator_config['macd'] = deepcopy(base_macd)
+        else:
+            user_indicator_messages.append('MACD config missing; skipping.')
+
+    indicator_bundle = compute_visual_indicators(price_df, selected_indicator_config)
+    indicator_messages = indicator_load_messages + user_indicator_messages + indicator_bundle.messages
     equity, drawdown, returns = build_equity_and_drawdown(series_map)
     events_df = parse_order_events(jsons)
     orders_df = enrich_orders(jsons)
@@ -883,7 +1201,7 @@ def update_visual(backtest_folder, _resample_clicks, resample_value, resample_un
     trades_df = build_trade_table(trades_df, orders_df, events_df)
     orders_df = build_order_table(orders_df, events_df)
 
-    fig = build_figure(price_df, indicators, equity, drawdown, returns, trades_df, expected_interval)
+    fig = build_figure(price_df, indicator_bundle, equity, drawdown, returns, trades_df, expected_interval)
 
     # Build additional charts to render below the main chart
     extra_blocks = []
@@ -929,12 +1247,13 @@ def update_visual(backtest_folder, _resample_clicks, resample_value, resample_un
     # Build optional notices
     notices = []
     if price_df is None:
+        symbol_hint = price_diag.get('symbol_hint', 'the detected symbol')
         notices.append(html.Div([
             html.B('Price data not loaded.'), html.Br(),
             html.Span(f"Reason: {price_diag.get('error','unknown')}") ,
             html.Ul([
-                html.Li('Ensure a CSV exists inside folder named as EquityName (case-insensitive).'),
-                html.Li("Expected path: data/**/<EquityName>/original*.csv")
+                html.Li(f"Ensure a CSV exists inside a folder named after {symbol_hint} (case-insensitive)."),
+                html.Li("Expected path: data/**/<symbol>/original*.csv")
             ])
         ], style={'color':'#b36b00', 'background':'#fff7e6', 'border':'1px solid #ffe58f', 'padding':'6px 10px', 'margin':'8px 0'}))
     else:
@@ -943,6 +1262,12 @@ def update_visual(backtest_folder, _resample_clicks, resample_value, resample_un
         else:
             notice_text = f"Resolution: {freq_label}"
         notices.append(html.Div(notice_text, style={'color':'#135200','background':'#f6ffed','border':'1px solid #b7eb8f','padding':'4px 8px','margin':'8px 0','borderRadius':'4px'}))
+
+    for msg in indicator_messages:
+        notices.append(html.Div(
+            msg,
+            style={'color':'#664d03','background':'#fff9db','border':'1px solid #ffe58f','padding':'4px 8px','margin':'6px 0','borderRadius':'4px'}
+        ))
 
     # trades table
     if not trades_df.empty:

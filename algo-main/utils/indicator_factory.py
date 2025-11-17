@@ -22,5 +22,6 @@ def build_indicators(algo, symbol, config):
     indicators["bb"] = BollingerBands(periods["bb_period"], periods["bb_std_dev"])
     indicators["atr"] = AverageTrueRange(periods["atr_period"], MovingAverageType.Simple)
     indicators["vwap"] = VolumeWeightedAveragePriceIndicator(periods["vwap_period"])
-    algo.Debug(f"Built indicators: {list(indicators.keys())}")
+    algo.Debug(f"Built indicators1: {list(indicators)}")
+    algo.Debug(f"Built indicators2: {indicators}")
     return indicators

@@ -20,9 +20,13 @@ def get_upload_layout():
         ], style={'marginBottom':'10px'}),
         html.Div(id='fs-browser'),
         html.Hr(),
-        html.H4('Upload CSV'),
-        dcc.Upload(id='csv-uploader', children=html.Div(['Drag & Drop or ', html.B('Select CSV')]),
-                   multiple=False, style={'border':'1px dashed #999','padding':'20px','width':'50%'}),
+        html.H4('Upload CSV / Excel'),
+        dcc.Upload(
+            id='csv-uploader',
+            children=html.Div(['Drag & Drop or ', html.B('Select CSV/XLSX')]),
+            multiple=False,
+            style={'border':'1px dashed #999','padding':'20px','width':'50%'}
+        ),
         html.Div(id='upload-status', style={'marginTop':'10px'}),
     ])
 
@@ -113,8 +117,11 @@ def register_upload_callbacks(app):
     def save_upload(content, filename, path):
         if not content or not filename:
             return ''
-        if not filename.lower().endswith('.csv'):
-            return html.Span('Only CSV files supported.', style={'color':'red'})
+        lower_name = filename.lower()
+        is_csv = lower_name.endswith('.csv')
+        is_excel = lower_name.endswith('.xlsx') or lower_name.endswith('.xls')
+        if not (is_csv or is_excel):
+            return html.Span('Only CSV or Excel (.xlsx/.xls) files supported.', style={'color':'red'})
         rel_path = (path or '').strip('/')
         symbol = rel_path.split('/')[-1] if rel_path else None
         if not symbol:
@@ -124,8 +131,25 @@ def register_upload_callbacks(app):
             raw_bytes = base64.b64decode(b64)
             abs_base = safe_join(DATA_ROOT, rel_path)
             os.makedirs(abs_base, exist_ok=True)
-            sanitized_csv = sanitize_to_strict_csv(raw_bytes)
-            original_path = os.path.join(abs_base, f'original_{filename}')
+            if is_excel:
+                try:
+                    df = pd.read_excel(io.BytesIO(raw_bytes))
+                except ImportError as e:
+                    return html.Span(f'Excel support requires openpyxl or xlrd: {e}', style={'color':'red'})
+                except Exception as e:
+                    return html.Span(f'Unable to read Excel file: {e}', style={'color':'red'})
+                if df.empty:
+                    return html.Span('Excel file contains no rows.', style={'color':'red'})
+                temp_csv = io.StringIO()
+                df.to_csv(temp_csv, index=False)
+                sanitized_csv = sanitize_to_strict_csv(temp_csv.getvalue().encode('utf-8'))
+            else:
+                sanitized_csv = sanitize_to_strict_csv(raw_bytes)
+            original_basename = os.path.splitext(filename)[0] if is_excel else filename
+            original_name = f"original_{original_basename}"
+            if is_excel and not original_name.lower().endswith('.csv'):
+                original_name = f"{original_name}.csv"
+            original_path = os.path.join(abs_base, original_name)
             with open(original_path, 'w', encoding='utf-8', newline='\n') as f:
                 f.write(sanitized_csv)
             result = convert_equity_minute_to_lean_stream(original_path, symbol)
@@ -147,13 +171,13 @@ def register_upload_callbacks(app):
                     except OSError:
                         pass
                 return html.Span(
-                    f'Daily data converted -> {created_zip} (includes lean CSV and original_{filename}).',
+                    f'Daily data converted -> {created_zip} (includes lean CSV and {original_name}).',
                     style={'color':'green'}
                 )
             if not files:
                 return html.Span('No valid minute rows detected. Nothing converted.', style={'color':'orange'})
             preview = ', '.join(files[:5]) + (' ...' if len(files) > 5 else '')
-            return html.Span(f'Converted {len(files)} day(s): {preview}', style={'color':'green'})
+            return html.Span(f'Converted {len(files)} day(s): {preview} (source saved as {original_name})', style={'color':'green'})
         except Exception as e:
             return html.Span(f'Upload failed: {e}', style={'color':'red'})
 

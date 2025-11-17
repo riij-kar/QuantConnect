@@ -65,11 +65,19 @@ def frequency_to_timedelta(value: int, unit: str) -> Optional[pd.Timedelta]:
         offset = to_offset(f"{value}{config.code}")
     except Exception:
         return None
-    if hasattr(offset, "delta") and offset.delta is not None:
-        return offset.delta
-    if hasattr(offset, "nanos"):
+    try:
+        delta = offset.delta  # type: ignore[attr-defined]
+    except (AttributeError, ValueError, TypeError):
+        delta = None
+    if delta is not None:
+        return delta
+    try:
+        nanos = offset.nanos  # type: ignore[attr-defined]
+    except (AttributeError, ValueError, TypeError):
+        nanos = None
+    if nanos is not None:
         try:
-            return pd.to_timedelta(offset.nanos, unit="ns")
+            return pd.to_timedelta(nanos, unit="ns")
         except Exception:
             return None
     return None
