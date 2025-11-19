@@ -110,3 +110,17 @@ Extending `app.py`
 * Integrate new statistics by extending `_stat_color`, `_render_stats_panel`, or the notice logic in `update_visual`.
 
 Questions or enhancements can be captured in issues/PRs referencing the relevant section of this document.
+
+Command Reference
+-----------------
+- `docker pull quantconnect/lean:latest`
+- `docker pull quantconnect/research:latest`
+- `pip install --upgrade lean`
+- `lean create-project "MyProjectName"`
+- `lean backtest "algo-main"`
+- `lean backtest "MyProjectName"`
+- `lean research "algo-main" --image quantconnect/research:latest`
+- `cd D:\Algos\QuantConnect\ui`
+- `.\.venv\Scripts\Activate.ps1`
+- `python app.py`
+- `pip install TA-Lib`

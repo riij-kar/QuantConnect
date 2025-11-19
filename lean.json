@@ -615,7 +615,7 @@
     },
     "job-organization-id": "3ad95520b9c3d3bbb53c2b3df6fa05dd",
     "organization-id": "3ad95520b9c3d3bbb53c2b3df6fa05dd",
-    "file-database-last-update": "11/17/2025 20:42:56",
+    "file-database-last-update": "11/19/2025 21:29:16",
     "id": "Local",
     "default-research-image": "quantconnect/research:latest",
     "default-image": "quantconnect/lean:foundation"

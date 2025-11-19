@@ -24,7 +24,7 @@ MA_TYPE_MAP = {
 
 @dataclass
 class IndicatorBundle:
-    overlays: Dict[str, pd.Series]
+    overlays: Dict[str, Any]
     oscillators: Dict[str, Dict[str, Any]]
     messages: List[str]
 
@@ -48,7 +48,7 @@ def _resolve_ma_type(name: Optional[str]) -> int:
     return MA_TYPE_MAP.get(str(name).upper(), talib.MA_Type.SMA)
 
 
-def _compute_supertrend(df: pd.DataFrame, period: int, multiplier: float) -> Dict[str, pd.Series]:
+def _compute_supertrend(df: pd.DataFrame, period: int, multiplier: float) -> Dict[str, Any]:
     if any(col not in df.columns for col in ("high", "low", "close")):
         return {}
     high = pd.to_numeric(df["high"], errors="coerce")
@@ -71,29 +71,53 @@ def _compute_supertrend(df: pd.DataFrame, period: int, multiplier: float) -> Dic
     final_upper = basic_upper.copy()
     final_lower = basic_lower.copy()
     for i in range(1, len(df)):
-        if basic_upper.iloc[i] < final_upper.iloc[i - 1] or close.iloc[i - 1] > final_upper.iloc[i - 1]:
-            final_upper.iloc[i] = basic_upper.iloc[i]
-        else:
-            final_upper.iloc[i] = final_upper.iloc[i - 1]
+        prev_upper = final_upper.iloc[i - 1]
+        prev_lower = final_lower.iloc[i - 1]
+        upper_candidate = basic_upper.iloc[i]
+        lower_candidate = basic_lower.iloc[i]
 
-        if basic_lower.iloc[i] > final_lower.iloc[i - 1] or close.iloc[i - 1] < final_lower.iloc[i - 1]:
-            final_lower.iloc[i] = basic_lower.iloc[i]
+        if not pd.isna(upper_candidate) and (pd.isna(prev_upper) or upper_candidate < prev_upper or close.iloc[i - 1] > prev_upper):
+            final_upper.iloc[i] = upper_candidate
         else:
-            final_lower.iloc[i] = final_lower.iloc[i - 1]
+            final_upper.iloc[i] = prev_upper
 
-    supertrend = pd.Series(index=df.index, dtype=float)
-    supertrend.iloc[0] = final_upper.iloc[0]
-    for i in range(1, len(df)):
+        if not pd.isna(lower_candidate) and (pd.isna(prev_lower) or lower_candidate > prev_lower or close.iloc[i - 1] < prev_lower):
+            final_lower.iloc[i] = lower_candidate
+        else:
+            final_lower.iloc[i] = prev_lower
+
+    final_upper = final_upper.ffill()
+    final_lower = final_lower.ffill()
+    start_idx = final_upper.first_valid_index()
+    if start_idx is None:
+        return {}
+    start_pos = final_upper.index.get_loc(start_idx)
+
+    supertrend = pd.Series(np.nan, index=df.index, dtype=float)
+    initial_upper = final_upper.iloc[start_pos]
+    initial_lower = final_lower.iloc[start_pos]
+    supertrend.iloc[start_pos] = initial_upper if close.iloc[start_pos] <= initial_upper else initial_lower
+    for i in range(start_pos + 1, len(df)):
         prev = supertrend.iloc[i - 1]
-        if prev == final_upper.iloc[i - 1]:
-            supertrend.iloc[i] = final_upper.iloc[i] if close.iloc[i] <= final_upper.iloc[i] else final_lower.iloc[i]
+        prev_upper = final_upper.iloc[i - 1]
+        prev_lower = final_lower.iloc[i - 1]
+        current_upper = final_upper.iloc[i]
+        current_lower = final_lower.iloc[i]
+
+        if prev == prev_upper:
+            supertrend.iloc[i] = current_upper if close.iloc[i] <= current_upper else current_lower
         else:
-            supertrend.iloc[i] = final_lower.iloc[i] if close.iloc[i] >= final_lower.iloc[i] else final_upper.iloc[i]
+            supertrend.iloc[i] = current_lower if close.iloc[i] >= current_lower else current_upper
 
     return {
-        f"Supertrend Upper ({period}, {multiplier})": final_upper,
-        f"Supertrend Lower ({period}, {multiplier})": final_lower,
-        f"Supertrend ({period}, {multiplier})": supertrend,
+        f"Supertrend ({period}, {multiplier})": {
+            "type": "supertrend",
+            "period": period,
+            "multiplier": multiplier,
+            "upper": final_upper,
+            "lower": final_lower,
+            "trend": supertrend,
+        }
     }
 
 

@@ -326,6 +326,66 @@ def _coerce_period_list(raw_values) -> List[int]:
                 continue
     return sorted(set(values))
 
+
+def _validate_timezone(tz_name: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """Return (timezone, error_message)."""
+    if not tz_name:
+        return None, None
+    try:
+        tz_normalized = str(tz_name).strip()
+        if not tz_normalized:
+            return None, None
+        # pandas validates the timezone string by attempting to use it
+        pd.Timestamp.now(tz=tz_normalized)
+        return tz_normalized, None
+    except Exception:
+        return None, f"Invalid timezone '{tz_name}' in project config; timestamps left unchanged."
+
+
+def _convert_index_timezone(obj: Any, tz_name: Optional[str], naive_origin: Optional[str]) -> Any:
+    """Return a copy of the DataFrame/Series with its index converted to ``tz_name``.
+
+    ``naive_origin`` indicates the timezone to assume when the index is naive (e.g. ``'UTC'`` or target tz).
+    """
+    if obj is None or tz_name is None or not isinstance(obj, (pd.Series, pd.DataFrame)):
+        return obj
+    idx = getattr(obj, 'index', None)
+    if not isinstance(idx, pd.DatetimeIndex):
+        return obj
+    try:
+        localized = idx
+        if localized.tz is None:
+            origin = naive_origin or 'UTC'
+            localized = localized.tz_localize(origin)
+        converted = localized.tz_convert(tz_name)
+    except Exception:
+        return obj
+    clone = obj.copy()
+    clone.index = converted
+    return clone
+
+
+def _convert_column_timezone(df: Optional[pd.DataFrame], column: str, tz_name: Optional[str], naive_origin: Optional[str]) -> Optional[pd.DataFrame]:
+    """Convert a datetime-like column to the target timezone, returning a copy when modified."""
+    if df is None or tz_name is None or column not in df.columns:
+        return df
+    try:
+        converted = pd.to_datetime(df[column], errors='coerce')
+    except Exception:
+        return df
+    if not pd.api.types.is_datetime64_any_dtype(converted):
+        return df
+    try:
+        if converted.dt.tz is None:
+            origin = naive_origin or 'UTC'
+            converted = converted.dt.tz_localize(origin)
+        converted = converted.dt.tz_convert(tz_name)
+    except Exception:
+        return df
+    clone = df.copy()
+    clone[column] = converted
+    return clone
+
 # Render statistics as inline spans with spacing and heuristic coloring.
 def _render_stats(stats: dict):
     items = []
@@ -511,14 +571,16 @@ def build_figure(price_df, indicator_bundle: Optional[IndicatorBundle], equity, 
         except Exception:
             return series_obj
 
-    overlays_plot = {}
+    overlays_plot: Dict[str, pd.Series] = {}
+    overlay_structs: List[tuple[str, Dict[str, Any]]] = []
     for name, series_obj in overlays_raw.items():
-        if not isinstance(series_obj, pd.Series):
-            continue
-        sliced = _slice_series(series_obj)
-        if sliced is None or sliced.dropna().empty:
-            continue
-        overlays_plot[name] = sliced
+        if isinstance(series_obj, pd.Series):
+            sliced = _slice_series(series_obj)
+            if sliced is None or sliced.dropna().empty:
+                continue
+            overlays_plot[name] = sliced
+        elif isinstance(series_obj, dict):
+            overlay_structs.append((name, series_obj))
 
     oscillator_plot = []
     for name, spec in oscillators_raw.items():
@@ -585,6 +647,14 @@ def build_figure(price_df, indicator_bundle: Optional[IndicatorBundle], equity, 
         _extend_axis(price_plot.index)
     for ser in overlays_plot.values():
         _extend_axis(getattr(ser, 'index', None))
+    for _, spec in overlay_structs:
+        if not isinstance(spec, dict):
+            continue
+        if spec.get('type') == 'supertrend':
+            for key in ('upper', 'lower', 'trend'):
+                series_candidate = spec.get(key)
+                if isinstance(series_candidate, pd.Series):
+                    _extend_axis(series_candidate.index)
     for _, spec in oscillator_plot:
         for value in spec.values():
             if isinstance(value, pd.Series):
@@ -720,6 +790,66 @@ def build_figure(price_df, indicator_bundle: Optional[IndicatorBundle], equity, 
             connectgaps=False
         )
         _add_trace(overlay_trace, row=price_row, col=1)
+
+    supertrend_plot: List[tuple[str, pd.Series, pd.Series, pd.Series]] = []
+    for name, spec in overlay_structs:
+        if spec.get('type') != 'supertrend':
+            continue
+        upper_ser = spec.get('upper')
+        lower_ser = spec.get('lower')
+        trend_ser = spec.get('trend')
+        if not all(isinstance(obj, pd.Series) for obj in (upper_ser, lower_ser, trend_ser)):
+            continue
+        upper_slice = _slice_series(upper_ser)
+        lower_slice = _slice_series(lower_ser)
+        trend_slice = _slice_series(trend_ser)
+        if any(obj is None for obj in (upper_slice, lower_slice, trend_slice)):
+            continue
+        # Align indices so segment masks line up
+        trend_slice = trend_slice.astype(float)
+        common_index = trend_slice.index
+        upper_slice = upper_slice.reindex(common_index)
+        lower_slice = lower_slice.reindex(common_index)
+        supertrend_plot.append((name, upper_slice, lower_slice, trend_slice))
+
+    for name, upper_ser, lower_ser, trend_ser in supertrend_plot:
+        if upper_ser.dropna().empty or lower_ser.dropna().empty or trend_ser.dropna().empty:
+            continue
+
+        valid_mask = ~(upper_ser.isna() | lower_ser.isna() | trend_ser.isna())
+        if not valid_mask.any():
+            continue
+
+        trend_equals_lower = pd.Series(
+            np.isclose(trend_ser.values, lower_ser.values, equal_nan=True),
+            index=trend_ser.index
+        )
+        up_mask = valid_mask & trend_equals_lower
+        down_mask = valid_mask & ~trend_equals_lower
+
+        def _plot_supertrend_segment(mask: pd.Series, line_color: str, label_suffix: str):
+            if not mask.any():
+                return
+            masked_trend = trend_ser.where(mask, np.nan)
+            if masked_trend.dropna().empty:
+                return
+
+            x_vals = _map_index(masked_trend.index)
+
+            trend_line = go.Scatter(
+                x=x_vals,
+                y=masked_trend.values,
+                mode='lines',
+                name=f"{name} {label_suffix}",
+                line=dict(color=line_color, width=2),
+                connectgaps=False,
+                legendgroup=name,
+                hovertemplate=f"{name}: %{{y:.2f}}<extra></extra>"
+            )
+            _add_trace(trend_line, row=price_row, col=1)
+
+        _plot_supertrend_segment(up_mask, 'rgba(34, 197, 94, 1)', '(Up)')
+        _plot_supertrend_segment(down_mask, 'rgba(239, 68, 68, 1)', '(Down)')
 
     if trades_plot is not None and not trades_plot.empty:
         for _, r in trades_plot.iterrows():
@@ -1091,11 +1221,16 @@ def update_visual(backtest_folder, _resample_clicks, resample_value, resample_un
     data_root = os.path.join(WORKSPACE_ROOT, 'data')
     indicator_config: Dict[str, Any] = {}
     indicator_load_messages: List[str] = []
+    ui_timezone: Optional[str] = None
+    timezone_message: Optional[str] = None
     config_path = os.path.join(project_path, 'config.json')
     try:
         with open(config_path, 'r', encoding='utf-8') as cfg_file:
             project_config = json.load(cfg_file)
-        indicator_config = ((project_config.get('ui') or {}).get('indicators')) or {}
+        ui_section = project_config.get('ui') or {}
+        indicator_config = (ui_section.get('indicators')) or {}
+        tz_candidate = ui_section.get('timezone') or project_config.get('timezone')
+        ui_timezone, timezone_message = _validate_timezone(tz_candidate)
     except FileNotFoundError:
         indicator_load_messages.append("Indicator config not found; overlays/oscillators disabled.")
     except Exception as exc:
@@ -1108,10 +1243,17 @@ def update_visual(backtest_folder, _resample_clicks, resample_value, resample_un
     expected_interval = frequency_to_timedelta(freq_value, freq_unit)
     try:
         csv_df, _csv_path, price_diag = load_ohlcv_from_csv(project_path, data_root, backtest_folder)
-        print('[app] Price loader diagnostics:', csv_df.head(10))
+        # print('[app] Price loader diagnostics:', csv_df.head(10))
     except Exception as e:
         csv_df, _csv_path, price_diag = None, None, {'error': f'Loader exception: {e}'}
     if csv_df is not None and not csv_df.empty:
+        if ui_timezone:
+            csv_before_samples = [str(idx) for idx in csv_df.index[:5]]
+            converted_csv = _convert_index_timezone(csv_df, ui_timezone, naive_origin=ui_timezone)
+            csv_after_samples = [str(idx) for idx in converted_csv.index[:5]]
+            print('[timezone] CSV index before conversion:', csv_before_samples)
+            print('[timezone] CSV index after conversion:', csv_after_samples)
+            csv_df = converted_csv
         price_df = resample_ohlcv(csv_df, freq_value, freq_unit)
         try:
             price_source_note = f"Price source: {os.path.basename(_csv_path)}"
@@ -1121,8 +1263,17 @@ def update_visual(backtest_folder, _resample_clicks, resample_value, resample_un
     if (price_df is None or price_df.empty) and series_map:
         built_price = build_price_from_series(series_map)
         if built_price is not None and not built_price.empty:
+            if ui_timezone:
+                built_before_samples = [str(idx) for idx in built_price.index[:5]]
+                converted_built = _convert_index_timezone(built_price, ui_timezone, naive_origin='UTC')
+                built_after_samples = [str(idx) for idx in converted_built.index[:5]]
+                print('[timezone] Chart-series index before conversion:', built_before_samples)
+                print('[timezone] Chart-series index after conversion:', built_after_samples)
+                built_price = converted_built
             price_df = resample_ohlcv(built_price, freq_value, freq_unit)
             price_source_note = "Price source: backtest chart series"
+    if price_df is not None and not price_df.empty and ui_timezone:
+        price_df = _convert_index_timezone(price_df, ui_timezone, naive_origin=ui_timezone)
     base_indicator_config = indicator_config or {}
     selected_indicator_config: Dict[str, Any] = {}
     user_indicator_messages: List[str] = []
@@ -1194,12 +1345,39 @@ def update_visual(backtest_folder, _resample_clicks, resample_value, resample_un
 
     indicator_bundle = compute_visual_indicators(price_df, selected_indicator_config)
     indicator_messages = indicator_load_messages + user_indicator_messages + indicator_bundle.messages
+    if timezone_message:
+        indicator_messages = [timezone_message] + indicator_messages
     equity, drawdown, returns = build_equity_and_drawdown(series_map)
+    if ui_timezone:
+        equity = _convert_index_timezone(equity, ui_timezone, naive_origin='UTC')
+        drawdown = _convert_index_timezone(drawdown, ui_timezone, naive_origin='UTC')
+        returns = _convert_index_timezone(returns, ui_timezone, naive_origin='UTC')
     events_df = parse_order_events(jsons)
+    if ui_timezone and not events_df.empty:
+        if 'dt' in events_df.columns:
+            events_before_samples = [str(val) for val in events_df['dt'].head(5)]
+            converted_events = _convert_column_timezone(events_df, 'dt', ui_timezone, naive_origin='UTC')
+            events_after_samples = [str(val) for val in converted_events['dt'].head(5)]
+            print('[timezone] Order events dt before conversion:', events_before_samples)
+            print('[timezone] Order events dt after conversion:', events_after_samples)
+            events_df = converted_events
+        else:
+            events_df = _convert_column_timezone(events_df, 'dt', ui_timezone, naive_origin='UTC')
     orders_df = enrich_orders(jsons)
+    if ui_timezone and not orders_df.empty:
+        for col in ['time', 'createdTime', 'lastFillTime']:
+            orders_df = _convert_column_timezone(orders_df, col, ui_timezone, naive_origin='UTC')
     trades_df = reconstruct_trades(jsons)
+    if ui_timezone and not trades_df.empty:
+        for col in ['entryTime', 'exitTime']:
+            trades_df = _convert_column_timezone(trades_df, col, ui_timezone, naive_origin='UTC')
     trades_df = build_trade_table(trades_df, orders_df, events_df)
+    if ui_timezone and not trades_df.empty:
+        for col in ['entryTime', 'exitTime']:
+            trades_df = _convert_column_timezone(trades_df, col, ui_timezone, naive_origin='UTC')
     orders_df = build_order_table(orders_df, events_df)
+    if ui_timezone and not orders_df.empty:
+        orders_df = _convert_column_timezone(orders_df, 'lastEventTime', ui_timezone, naive_origin='UTC')
 
     fig = build_figure(price_df, indicator_bundle, equity, drawdown, returns, trades_df, expected_interval)
 
@@ -1261,6 +1439,8 @@ def update_visual(backtest_folder, _resample_clicks, resample_value, resample_un
             notice_text = f"{price_source_note} | Resolution: {freq_label}"
         else:
             notice_text = f"Resolution: {freq_label}"
+        if ui_timezone:
+            notice_text += f" | TZ: {ui_timezone}"
         notices.append(html.Div(notice_text, style={'color':'#135200','background':'#f6ffed','border':'1px solid #b7eb8f','padding':'4px 8px','margin':'8px 0','borderRadius':'4px'}))
 
     for msg in indicator_messages:

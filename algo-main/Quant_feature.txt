@@ -1,0 +1,421 @@
+Here is a **clean, complete, practical list** of all the important **QuantConnect concepts / features** you can implement inside an algorithm.
+This is like a *master checklist* used by professional quants on QC.
+
+I’ve grouped them by category so you immediately know what is possible.
+
+---
+
+# ⭐ **1. Core Framework Concepts**
+
+These form the foundation of every QC algorithm.
+
+### ✔ `Initialize()`
+
+Set everything: securities, resolution, cash, broker model, warmup.
+
+### ✔ `OnData()`
+
+The main event handler for incoming data.
+
+### ✔ Universe Selection
+
+Dynamic or static selection of stocks using:
+
+* coarse fundamental
+* fine fundamental
+* ETF constituents
+* custom universe filters
+
+### ✔ Alpha Model
+
+Generate insights:
+
+* price up/down
+* volatility changes
+* directional confidence
+* magnitude + timeframe
+
+### ✔ Portfolio Construction
+
+Position sizing frameworks:
+
+* equal weighting
+* risk parity
+* volatility weighting
+* mean–variance optimization
+
+### ✔ Execution Model
+
+How trades are executed:
+
+* immediate
+* VWAP
+* limit
+* market-on-open/close
+* custom execution logic
+
+### ✔ Risk Management
+
+Kill trades or reduce exposure based on:
+
+* drawdown
+* volatility
+* portfolio concentration
+* portfolio margin
+
+---
+
+# ⭐ **2. Data & Indicators**
+
+QuantConnect gives deep data tools.
+
+### ✔ Historical Data Requests
+
+`History()` for candles, indicators, rolling windows.
+
+### ✔ Consolidators
+
+Convert 1-min → 5-min → hourly → daily bars.
+
+### ✔ Custom Indicators
+
+Build your own:
+
+* SuperTrend
+* Hurst
+* ADF/KPSS regime detectors
+* volatility regimes
+* liquidity models
+
+### ✔ Built-in Indicators
+
+~150+ indicators:
+
+* EMA/SMA
+* MACD, RSI
+* ATR
+* BollingerBands
+* ADX
+* Ichimoku
+* VWAP
+* KAMA
+* Regression channels
+
+### ✔ Rolling Window
+
+Store last N candles for pattern detection.
+
+---
+
+# ⭐ **3. Trading Models**
+
+QC allows full customization.
+
+### ✔ Mean Reversion Systems
+
+* RSI, Bollinger, Z-score
+* pairs trading
+* statistical arbitrage
+
+### ✔ Trend Following
+
+* EMA crossover
+* momentum
+* breakout
+* Donchian channels
+
+### ✔ Options Trading
+
+* greeks
+* custom greeks
+* options universe filters
+* delta/vega hedging
+* spreads (vertical, iron condor, broken wing)
+* covered calls/puts
+* calendar spreads
+
+### ✔ Futures & Crypto
+
+Multi-asset trading with:
+
+* futures chains
+* margin models
+* back-adjusted continuous contracts
+
+### ✔ Event-driven trading
+
+* Earnings events
+* Splits
+* Dividends
+* Macro events (custom CSV/dataset)
+
+---
+
+# ⭐ **4. Advanced Concepts**
+
+These take your QC algo to professional level.
+
+### ✔ Regime Detection
+
+Using:
+
+* volatility
+* moving average slope
+* ADF/KPSS + Hurst
+* custom ML models
+* bull/bear market filters
+
+### ✔ Machine Learning
+
+QC supports:
+
+* scikit-learn
+* TensorFlow
+* PyTorch
+* LightGBM
+* XGBoost
+
+For:
+
+* classification (buy/sell)
+* regression (price forecast)
+* anomaly detection
+
+### ✔ Walk-forward optimization
+
+Split training/testing periods for ML.
+
+### ✔ Parameter optimization
+
+Through **Genetic Algorithm Optimizer**.
+
+### ✔ Custom Models
+
+* custom alpha
+* custom portfolio construction
+* custom execution
+* custom risk model
+
+---
+
+# ⭐ **5. Risk & Money Management**
+
+Professional level controls.
+
+### ✔ Stop Loss
+
+% based or indicator-based.
+
+### ✔ Trailing stop
+
+ATR trailing, supertrend trailing.
+
+### ✔ Max drawdown control
+
+Auto liquidate or reduce position.
+
+### ✔ Exposure management
+
+Cap long/short exposure.
+
+### ✔ Volatility-based position sizing
+
+Use ATR, variance, beta.
+
+### ✔ Kelly & fractional Kelly sizing
+
+---
+
+# ⭐ **6. Event Scheduling**
+
+Automate scheduled tasks:
+
+### ✔ Scheduled Events
+
+Run logic at:
+
+* market open
+* close
+* hourly
+* every N minutes
+* specific dates
+
+---
+
+# ⭐ **7. Multi-Portfolio / Multi-Asset Models**
+
+Build complex systems:
+
+### ✔ Multiple Alphas
+
+Combine momentum + mean reversion + news.
+
+### ✔ Sector rotation
+
+Trade ETFs or Indian sectors.
+
+### ✔ Long-short equity
+
+130/30 or dollar-neutral pairs.
+
+### ✔ Portfolio hedging
+
+Use SPY, gold, or VIX futures.
+
+---
+
+# ⭐ **8. Custom Data**
+
+You can import any kind of external data:
+
+### ✔ CSV data
+
+### ✔ Alternative data (crypto, news sentiment)
+
+### ✔ REST API data
+
+### ✔ Google Sheets data
+
+### ✔ Financial events data
+
+---
+
+# ⭐ **9. Futures, Options & Derivatives**
+
+This is where QC is extremely powerful.
+
+### ✔ Option Chains
+
+Discover and filter contracts:
+
+* expiry
+* strike
+* delta range
+* OI
+* IV percentile
+
+### ✔ Greeks
+
+Delta, theta, vega, gamma, rho.
+
+### ✔ Option strategies
+
+* spreads
+* butterflies
+* iron condor
+* straddles/strangles
+* covered calls
+* wheel strategy
+
+---
+
+# ⭐ **10. Infrastructure & Engine Features**
+
+### ✔ Warmup period
+
+Load previous candles before live trading.
+
+### ✔ Brokerage models
+
+Simulate:
+
+* Interactive Brokers
+* TD Ameritrade
+* Tradier
+* OANDA
+* Crypto brokerage models
+
+### ✔ Slippage models
+
+Model realistic market behavior.
+
+### ✔ Transaction fees
+
+Simulate real brokerage costs.
+
+---
+
+# ⭐ **11. Execution Tools**
+
+### ✔ Order types
+
+* market
+* limit
+* stop market
+* stop-limit
+* trailing stop
+* MOC
+* OCO (one cancels other)
+
+### ✔ Fill models
+
+Simulate real fills.
+
+### ✔ Time-in-force
+
+* GTC
+* Day
+* IOC
+
+---
+
+# ⭐ **12. Research Environment**
+
+### ✔ Jupyter Lab
+
+### ✔ Research notebooks
+
+### ✔ Build & test indicators
+
+### ✔ ML training
+
+### ✔ Data exploration before coding the algo
+
+---
+
+# ⭐ **13. Live Trading Features**
+
+### ✔ Paper trading
+
+### ✔ Live algo
+
+### ✔ Email/SMS/Slack notifications
+
+### ✔ Webhooks
+
+### ✔ Portfolio charts
+
+---
+
+# ⭐ **14. Backup & Logging Tools**
+
+### ✔ Debugging logs
+
+### ✔ Object store
+
+### ✔ Persist data between sessions
+
+---
+
+# ⭐ **If you want…**
+
+I can prepare for you:
+
+### 🔥 A “Master QuantConnect Roadmap”
+
+– what to learn in order
+– which features to practice
+– which features matter for algo vs swing vs option trading
+
+### 🔥 A perfect starter template algorithm
+
+(Mean reversion / momentum / option / futures)
+
+### 🔥 A full multi-model QC architecture
+
+(alpha + portfolio + execution + risk)
+
+### 🔥 A regime-based trading system ready for backtesting on QC
+
+Just tell me **what style of trading** you want the QC algo for:
+**Swing, Intraday, Options, Multi-Asset, ML-based, Regime-based?**

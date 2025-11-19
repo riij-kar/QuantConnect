@@ -1,4 +1,4 @@
-import os, json, pandas as pd
+import os, json, numpy as np, pandas as pd
 from datetime import datetime
 from typing import List, Dict, Any
 
@@ -78,6 +78,72 @@ def reconstruct_trades(json_map: Dict[str, Any]) -> pd.DataFrame:
             except Exception:
                 pass
     return df
+
+
+def _to_json_safe(value):
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, np.datetime64):
+        try:
+            return pd.to_datetime(value).isoformat()
+        except Exception:
+            return str(value)
+    if isinstance(value, (pd.Series, pd.Index)):
+        return [_to_json_safe(v) for v in value.tolist()]
+    if isinstance(value, np.ndarray):
+        return [_to_json_safe(v) for v in value.tolist()]
+    if isinstance(value, datetime):
+        try:
+            return value.isoformat()
+        except Exception:
+            return str(value)
+    if isinstance(value, dict):
+        return {k: _to_json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_to_json_safe(v) for v in value]
+    if value is pd.NaT:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except TypeError:
+        pass
+    except ValueError:
+        try:
+            return [_to_json_safe(v) for v in np.asarray(value).tolist()]
+        except Exception:
+            return str(value)
+    return value
+
+
+def _normalize_table_cell(value):
+    if isinstance(value, (list, tuple, set, np.ndarray, pd.Series, pd.Index)):
+        safe = _to_json_safe(value)
+        return json.dumps(safe)
+    if isinstance(value, dict):
+        safe = _to_json_safe(value)
+        return json.dumps(safe)
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, np.datetime64):
+        try:
+            return pd.to_datetime(value).isoformat()
+        except Exception:
+            return str(value)
+    if isinstance(value, datetime):
+        try:
+            return value.isoformat()
+        except Exception:
+            return str(value)
+    if value is pd.NaT:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except TypeError:
+        pass
+    return value
+
 
 # --- Enriched tables ---
 
@@ -177,7 +243,7 @@ def build_trade_table(trades_df: pd.DataFrame, orders_df: pd.DataFrame, events_d
             trades_df['limitPrices'] = trades_df.apply(agg_limits, axis=1)
     # Sanitize complex types for Dash DataTable (lists/dicts/etc -> JSON string)
     for col in trades_df.columns:
-        trades_df[col] = trades_df[col].apply(lambda x: json.dumps(x) if isinstance(x, (list, dict, set, tuple)) else x)
+        trades_df[col] = trades_df[col].apply(_normalize_table_cell)
     return trades_df
 
 
@@ -195,5 +261,5 @@ def build_order_table(orders_df: pd.DataFrame, events_df: pd.DataFrame) -> pd.Da
             last_fill = events_df.groupby('orderId')['dt'].max().rename('lastEventTime')
             orders_df = orders_df.merge(last_fill, on='orderId', how='left')
     for col in orders_df.columns:
-        orders_df[col] = orders_df[col].apply(lambda x: json.dumps(x) if isinstance(x, (list, dict, set, tuple)) else x)
+        orders_df[col] = orders_df[col].apply(_normalize_table_cell)
     return orders_df
