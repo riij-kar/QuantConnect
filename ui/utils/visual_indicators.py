@@ -24,31 +24,37 @@ MA_TYPE_MAP = {
 
 @dataclass
 class IndicatorBundle:
+    """Bundle of indicator overlays, oscillators, and informational messages."""
     overlays: Dict[str, Any]
     oscillators: Dict[str, Dict[str, Any]]
     messages: List[str]
 
     @classmethod
     def empty(cls) -> "IndicatorBundle":
+        """Return an empty bundle used when indicator computation is skipped."""
         return cls({}, {}, [])
 
 
 def _as_series(values: np.ndarray, index: pd.Index, name: str) -> pd.Series:
+    """Create a pandas Series with the supplied index and name."""
     return pd.Series(values, index=index, name=name)
 
 
 def _to_float_array(series: pd.Series) -> np.ndarray:
+    """Coerce a pandas Series into a float64 numpy array, preserving NaNs."""
     numeric = pd.to_numeric(series, errors="coerce")
     return np.asarray(numeric.to_numpy(dtype="float64"), dtype="float64")
 
 
 def _resolve_ma_type(name: Optional[str]) -> int:
+    """Translate a moving-average name into the TALib MA type enum."""
     if not name:
         return talib.MA_Type.SMA
     return MA_TYPE_MAP.get(str(name).upper(), talib.MA_Type.SMA)
 
 
 def _compute_supertrend(df: pd.DataFrame, period: int, multiplier: float) -> Dict[str, Any]:
+    """Compute Supertrend bands and trend series for the supplied OHLC data."""
     if any(col not in df.columns for col in ("high", "low", "close")):
         return {}
     high = pd.to_numeric(df["high"], errors="coerce")
@@ -122,6 +128,7 @@ def _compute_supertrend(df: pd.DataFrame, period: int, multiplier: float) -> Dic
 
 
 def _compute_vwap(df: pd.DataFrame, period: int, source: str) -> Optional[pd.Series]:
+    """Calculate a rolling VWAP series using the requested price source."""
     if "volume" not in df.columns:
         return None
     volume = df["volume"].astype(float)
@@ -141,6 +148,7 @@ def _compute_vwap(df: pd.DataFrame, period: int, source: str) -> Optional[pd.Ser
 
 
 def compute_visual_indicators(price_df: Optional[pd.DataFrame], indicator_config: Optional[Dict[str, Any]]) -> IndicatorBundle:
+    """Build indicator overlays/oscillators based on the dashboard configuration."""
     if price_df is None or price_df.empty or not indicator_config:
         return IndicatorBundle.empty()
 

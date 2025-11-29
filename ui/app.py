@@ -1,7 +1,7 @@
 import os, glob, json, pandas as pd, numpy as np
 from copy import deepcopy
 from datetime import datetime
-from dash import Dash, dcc, html, Input, Output, State, dash_table
+from dash import Dash, dcc, html, Input, Output, State, dash_table, callback_context
 from typing import Any, Dict, List, Optional
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -18,7 +18,8 @@ from utils.trade_mapper import (
     enrich_orders,
     reconstruct_trades,
     build_trade_table,
-    build_order_table
+    build_order_table,
+    build_trade_order_table
 )
 from utils.price_loader import load_ohlcv_from_csv
 from utils.consolidated import (
@@ -48,6 +49,34 @@ INDICATOR_CHECKLIST_OPTIONS = [
 DEFAULT_SMA_PERIOD_OPTIONS = [5, 8, 9, 10, 12, 15, 21, 34, 55, 89, 144, 200]
 DEFAULT_EMA_PERIOD_OPTIONS = [5, 8, 9, 12, 21, 34, 55, 89, 144, 200]
 
+SIDEBAR_BASE_STYLE = {
+    'flex': '0 0 320px',
+    'padding': '10px 12px',
+    'borderRight': '1px solid #eee',
+    'background': '#fafafa',
+    'height': '100vh',
+    'overflowY': 'auto'
+}
+
+MAIN_BASE_STYLE = {
+    'flex': '1 1 auto',
+    'height': '100vh',
+    'overflowY': 'auto'
+}
+
+def _sidebar_style(collapsed: bool = False) -> Dict[str, Any]:
+    style = SIDEBAR_BASE_STYLE.copy()
+    if collapsed:
+        style.update({'display': 'none'})
+    return style
+
+
+def _main_style(sidebar_collapsed: bool = False) -> Dict[str, Any]:
+    style = MAIN_BASE_STYLE.copy()
+    if sidebar_collapsed:
+        style.update({'flex': '1 1 100%', 'width': '100%'})
+    return style
+
 app = Dash(__name__, suppress_callback_exceptions=True)
 app.title = "QC Local Dashboard"
 # Allow large CSV uploads up to 200MB (adjust as needed)
@@ -58,6 +87,7 @@ app.server.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 # Scan the workspace root for candidate project directories that contain a
 # 'backtests' folder with at least one backtest. Returns absolute paths.
 def find_project_paths():
+    """Discover QC projects under ``WORKSPACE_ROOT`` that contain backtests."""
     print('WORKSPACE_ROOT', WORKSPACE_ROOT)
     paths = []
     for entry in os.listdir(WORKSPACE_ROOT):
@@ -74,6 +104,7 @@ def find_project_paths():
 # Enumerate backtest run folders for a given project and build dropdown options.
 # Tries to enrich the label using <timestamp>-summary.json statistics when present.
 def list_backtests(project_path: str):
+    """Return Dash dropdown options for backtests within a project."""
     bt_dir = os.path.join(project_path, 'backtests')
     if not os.path.isdir(bt_dir):
         return []
@@ -100,6 +131,7 @@ def list_backtests(project_path: str):
 
 # Load all top-level JSON files from a backtest folder into a dict keyed by filename.
 def load_backtest_folder(folder: str):
+    """Load all JSON artifacts in a backtest folder into a dictionary."""
     result = {}
     for path in glob.glob(os.path.join(folder, '*.json')):
         name = os.path.basename(path)
@@ -176,6 +208,7 @@ def extract_series(charts_obj: dict):
 # Try to build a price DataFrame from the extracted series using the common
 # 'Price::open/high/low/close' naming. Falls back to a single 'close' series.
 def build_price_from_series(series_map):
+    """Construct an OHLC/close DataFrame from the extracted series map."""
     # Attempt to construct OHLC from known naming patterns
     lower = {k.lower(): k for k in series_map.keys()}
     keys = {part: lower.get(part) for part in ['price::open','price::high','price::low','price::close']}
@@ -388,6 +421,7 @@ def _convert_column_timezone(df: Optional[pd.DataFrame], column: str, tz_name: O
 
 # Render statistics as inline spans with spacing and heuristic coloring.
 def _render_stats(stats: dict):
+    """Build styled Dash spans for headline statistics."""
     items = []
     for k, v in stats.items():
         color = _stat_color(k, v)
@@ -477,6 +511,7 @@ def _render_stats_panel(stats: dict) -> html.Div:
 # Extract closed trades from performance JSON files and return as a DataFrame suitable
 # for use in a Dash DataTable. Datetime fields are parsed and complex values serialized.
 def parse_trades(perf_jsons: dict) -> pd.DataFrame:
+    """Extract closed trades from performance JSON artifacts into a DataFrame."""
     # Look for closedTrades inside any performance JSON
     for name,data in perf_jsons.items():
         if not isinstance(data, dict):
@@ -503,7 +538,34 @@ def parse_trades(perf_jsons: dict) -> pd.DataFrame:
 
 # Build the main multi-panel Plotly figure (Price, Equity, Returns, Drawdown, RSI)
 # and mark trade entries/exits when available.
-def build_figure(price_df, indicator_bundle: Optional[IndicatorBundle], equity, drawdown, returns, trades_df, expected_interval=None):
+def build_figure(price_df, indicator_bundle: Optional[IndicatorBundle], equity, drawdown, returns, trades_df, expected_interval=None, show_entry_exit: bool = False):
+    """Assemble the dashboard's multi-panel Plotly figure.
+
+    Parameters
+    ----------
+    price_df : pandas.DataFrame or None
+        Primary price series (OHLC or close-only) used for the first subplot.
+    indicator_bundle : IndicatorBundle, optional
+        Visual indicators to overlay on the price chart and oscillators.
+    equity : pandas.DataFrame or pandas.Series
+        Equity curve data used to render the equity subplot.
+    drawdown : pandas.Series
+        Drawdown percentage series aligned with equity.
+    returns : pandas.Series
+        Period-over-period return series (percentage) for the returns subplot.
+    trades_df : pandas.DataFrame
+        Closed trades used for plotting entry/exit markers and trade tables.
+    expected_interval : pandas.Timedelta, optional
+        Target bar width for spacing markers (used for entry/exit clustering).
+    show_entry_exit : bool, optional
+        Toggle to control whether entry/exit markers are displayed.
+
+    Returns
+    -------
+    plotly.graph_objects.Figure
+        Four-row subplot figure containing price, RSI/oscillators, equity, and
+        return/drawdown series.
+    """
     MAX_PRICE_POINTS = int(os.environ.get('MAX_PRICE_POINTS', '0'))
     MAX_TRADE_MARKERS = int(os.environ.get('MAX_TRADE_MARKERS', '400'))
 
@@ -851,7 +913,7 @@ def build_figure(price_df, indicator_bundle: Optional[IndicatorBundle], equity, 
         _plot_supertrend_segment(up_mask, 'rgba(34, 197, 94, 1)', '(Up)')
         _plot_supertrend_segment(down_mask, 'rgba(239, 68, 68, 1)', '(Down)')
 
-    if trades_plot is not None and not trades_plot.empty:
+    if show_entry_exit and trades_plot is not None and not trades_plot.empty:
         for _, r in trades_plot.iterrows():
             if 'entryTime' in r and 'entryPrice' in r:
                 entry_x = _normalize_timestamp(r['entryTime'])
@@ -863,7 +925,8 @@ def build_figure(price_df, indicator_bundle: Optional[IndicatorBundle], equity, 
                         marker_symbol='triangle-up',
                         marker_color='green',
                         marker_size=10,
-                        name='Entry'
+                        name='Entry',
+                        hovertemplate='Entry Price: %{y}<extra></extra>'
                     )
                     _add_trace(entry_trace, row=price_row, col=1)
             if 'exitTime' in r and 'exitPrice' in r:
@@ -876,7 +939,8 @@ def build_figure(price_df, indicator_bundle: Optional[IndicatorBundle], equity, 
                         marker_symbol='x',
                         marker_color='red',
                         marker_size=9,
-                        name='Exit'
+                        name='Exit',
+                        hovertemplate='Exit Price: %{y}<extra></extra>'
                     )
                     _add_trace(exit_trace, row=price_row, col=1)
 
@@ -998,8 +1062,20 @@ def build_figure(price_df, indicator_bundle: Optional[IndicatorBundle], equity, 
         showlegend=True,
         xaxis_rangeslider_visible=False,
         hovermode='x unified',
+        hoverdistance=30,
+        spikedistance=-1,
         margin=dict(t=90, l=60, r=40, b=90)
     )
+    spike_style = dict(
+        showspikes=True,
+        spikemode='across+toaxis+marker',
+        spikesnap='cursor',
+        spikecolor='rgba(0,0,0,0.35)',
+        spikedash='dot',
+        spikethickness=1,
+        hoverformat='.2f'
+    )
+
     fig.update_yaxes(title_text='Volume', row=volume_row, col=1)
     for idx, (name, _) in enumerate(oscillator_plot):
         fig.update_yaxes(title_text=name, row=3 + idx, col=1)
@@ -1023,7 +1099,8 @@ def build_figure(price_df, indicator_bundle: Optional[IndicatorBundle], equity, 
                 tickmode='array',
                 tickvals=tick_positions,
                 ticktext=tick_text,
-                automargin=True
+                automargin=True,
+                **spike_style
             )
             for r in range(1, total_rows + 1):
                 fig.update_xaxes(row=r, col=1, **base_axis_kwargs)
@@ -1047,6 +1124,7 @@ def build_figure(price_df, indicator_bundle: Optional[IndicatorBundle], equity, 
                 tickangle=0,
                 tickfont=dict(size=11)
             )
+        fig.update_yaxes(**spike_style)
     except Exception:
         pass
     return fig
@@ -1082,15 +1160,31 @@ def get_chart_series(series_map: dict, chart_prefix: str) -> dict[str, pd.Series
         result[name] = ser
     return result
 
+
+def _entry_exit_enabled_for_project(project_path: str) -> bool:
+    """Read the project config and return whether entry/exit signals should be shown."""
+    config_path = os.path.join(project_path, 'config.json')
+    try:
+        with open(config_path, 'r', encoding='utf-8') as cfg_file:
+            project_config = json.load(cfg_file)
+    except Exception:
+        return False
+    ui_section = project_config.get('ui') or {}
+    controls_section = ui_section.get('controls') or {}
+    return bool(controls_section.get('entry_exit_signals'))
+
 # ---------- Layout ----------
 from pages.upload_page import get_upload_layout, register_upload_callbacks  # type: ignore
 
 # Build the main page layout with project/backtest selectors, chart, stats bar,
 # extra charts area, and trades table.
 def get_main_layout():
+    """Create the root Dash layout containing sidebar controls and charts."""
     # Two-column layout: left sidebar (selectors + stats), right main content (charts)
     sidebar = html.Div([
-        html.H3('QC Dashboard'),
+        html.Div([
+            html.H3('QC Dashboard', style={'margin': '0'}),
+        ], style={'display': 'flex', 'justifyContent': 'space-between', 'alignItems': 'center'}),
         html.Label('Project'),
         dcc.Dropdown(id='project-dd', options=[{'label': os.path.basename(p), 'value': p} for p in find_project_paths()], placeholder='Select project'),
         html.Label('Backtest', style={'marginTop':'6px'}),
@@ -1100,10 +1194,16 @@ def get_main_layout():
         ], style={'marginTop':'8px'}),
         html.Hr(),
         html.Div(id='stats-panel'),
-    ], style={'flex':'0 0 320px', 'padding':'10px 12px', 'borderRight':'1px solid #eee', 'background':'#fafafa', 'height':'100vh', 'overflowY':'auto'})
+    ], id='sidebar-panel', style=_sidebar_style(False))
 
     main = html.Div([
-        html.Div('Backtest Visualization', style={'fontSize':'22px','fontWeight':'600','margin':'10px 0 6px 10px'}),
+        html.Div([
+            html.Div('Backtest Visualization', style={'fontSize': '22px', 'fontWeight': '600'}),
+            html.Div([
+                html.Button('Entry/Exit Signals (Disabled)', id='toggle-entry-exit', n_clicks=0, disabled=True, style={'marginRight': '8px'}),
+                html.Button('Toggle Sidebar', id='toggle-sidebar', n_clicks=0)
+            ], style={'display': 'flex', 'alignItems': 'center', 'gap': '8px'})
+        ], style={'display': 'flex', 'alignItems': 'center', 'justifyContent': 'space-between', 'margin': '10px'}),
         html.Div([
             html.Span('Consolidate to', style={'marginRight':'6px', 'color':'#555'}),
             dcc.Input(id='resample-value', type='number', min=1, step=1, value=1, style={'width':'70px'}),
@@ -1158,24 +1258,33 @@ def get_main_layout():
                 ], style={'minWidth':'180px'}),
             ], style={'display':'flex', 'flexWrap':'wrap', 'gap':'16px', 'marginTop':'6px'})
         ], style={'margin':'0 10px 16px 10px', 'padding':'10px', 'border':'1px solid #eee', 'borderRadius':'6px', 'background':'#fafafa'}),
-        dcc.Loading(dcc.Graph(id='chart'), type='default'),
-        html.Div(id='extra-charts', style={'padding':'0 10px'}),
+        html.Div([
+            dcc.Loading(
+                dcc.Graph(id='chart'),
+                type='default'
+            ),
+            html.Div(id='extra-charts', style={'padding':'0 10px', 'marginTop':'12px'})
+        ], id='chart-fullscreen-container', style={'padding':'0 10px'}),
         html.H4('Trades', style={'margin':'10px'}),
         html.Div(id='trades-table', style={'padding':'0 10px 10px 10px'}),
+        html.H4('Trades & Orders', style={'margin':'10px'}),
+        html.Div(id='trade-orders-table', style={'padding':'0 10px 10px 10px'}),
         html.H4('Orders', style={'margin':'10px'}),
         html.Div(id='orders-table', style={'padding':'0 10px 20px 10px'})
-    ], style={'flex':'1 1 auto', 'height':'100vh', 'overflowY':'auto'})
+    ], id='main-panel', className='main-panel', style=_main_style(False))
 
-    return html.Div([sidebar, main], style={'display':'flex', 'height':'100vh'})
+    return html.Div([sidebar, main], id='layout-container', className='dashboard-root', style={'display':'flex', 'height':'100vh'})
 
 app.layout = html.Div([
     dcc.Location(id='url'),
-    html.Div(id='page-content')
-])
+    html.Div(id='page-content'),
+    dcc.Store(id='entry-exit-visible')
+], id='root-container', className='dashboard-root-container')
 
 # Simple router: '/' -> main dashboard, '/upload' -> CSV upload page.
 @app.callback(Output('page-content','children'), Input('url','pathname'))
 def route(pathname: str):
+    """Return the appropriate Dash layout for the requested ``pathname``."""
     if pathname == '/upload':
         return get_upload_layout()
     return get_main_layout()
@@ -1184,9 +1293,11 @@ def route(pathname: str):
 # Populate the backtest dropdown when a project is selected.
 @app.callback(Output('backtest-dd','options'), Input('project-dd','value'))
 def update_backtests(project_path):
+    """Refresh the backtest dropdown options when a project selection changes."""
     if not project_path:
         return []
     return list_backtests(project_path)
+
 
 # Main visualization callback: loads the selected backtest, builds series, figures,
 # stats, extra charts, and trades table.
@@ -1194,19 +1305,22 @@ def update_backtests(project_path):
     Output('chart','figure'),
     Output('stats-panel','children'),
     Output('trades-table','children'),
+    Output('trade-orders-table','children'),
     Output('extra-charts','children'),
     Output('orders-table','children'),
     Input('backtest-dd','value'),
     Input('resample-btn','n_clicks'),
+    Input('entry-exit-visible','data'),
     State('resample-value','value'),
     State('resample-unit','value'),
     State('indicator-checklist','value'),
     State('indicator-sma-periods','value'),
     State('indicator-ema-periods','value')
 )
-def update_visual(backtest_folder, _resample_clicks, resample_value, resample_unit, indicator_selection, sma_period_values, ema_period_values):
+def update_visual(backtest_folder, _resample_clicks, entry_exit_visible, resample_value, resample_unit, indicator_selection, sma_period_values, ema_period_values):
+    """Render charts, stats, and trade tables for the active backtest selection."""
     if not backtest_folder:
-        return {}, '', '', [], ''
+        return {}, '', '', '', [], ''
     jsons = load_backtest_folder(backtest_folder)
     # aggregate charts
     charts = {}
@@ -1223,6 +1337,7 @@ def update_visual(backtest_folder, _resample_clicks, resample_value, resample_un
     indicator_load_messages: List[str] = []
     ui_timezone: Optional[str] = None
     timezone_message: Optional[str] = None
+    entry_exit_config_enabled = False
     config_path = os.path.join(project_path, 'config.json')
     try:
         with open(config_path, 'r', encoding='utf-8') as cfg_file:
@@ -1231,10 +1346,13 @@ def update_visual(backtest_folder, _resample_clicks, resample_value, resample_un
         indicator_config = (ui_section.get('indicators')) or {}
         tz_candidate = ui_section.get('timezone') or project_config.get('timezone')
         ui_timezone, timezone_message = _validate_timezone(tz_candidate)
+        controls_section = ui_section.get('controls') or {}
+        entry_exit_config_enabled = bool(controls_section.get('entry_exit_signals'))
     except FileNotFoundError:
         indicator_load_messages.append("Indicator config not found; overlays/oscillators disabled.")
     except Exception as exc:
         indicator_load_messages.append(f"Indicator config load error: {exc}")
+        entry_exit_config_enabled = False
     price_df = None
     price_source_note = None
     price_diag = {}
@@ -1378,8 +1496,12 @@ def update_visual(backtest_folder, _resample_clicks, resample_value, resample_un
     orders_df = build_order_table(orders_df, events_df)
     if ui_timezone and not orders_df.empty:
         orders_df = _convert_column_timezone(orders_df, 'lastEventTime', ui_timezone, naive_origin='UTC')
+    trade_orders_df = build_trade_order_table(trades_df, orders_df)
 
-    fig = build_figure(price_df, indicator_bundle, equity, drawdown, returns, trades_df, expected_interval)
+    toggle_value = entry_exit_visible if entry_exit_visible is not None else entry_exit_config_enabled
+    show_entry_exit = bool(entry_exit_config_enabled and toggle_value)
+
+    fig = build_figure(price_df, indicator_bundle, equity, drawdown, returns, trades_df, expected_interval, show_entry_exit=show_entry_exit)
 
     # Build additional charts to render below the main chart
     extra_blocks = []
@@ -1451,14 +1573,27 @@ def update_visual(backtest_folder, _resample_clicks, resample_value, resample_un
 
     # trades table
     if not trades_df.empty:
+        trade_columns = [{'name': column, 'id': column} for column in trades_df.columns]
+        hidden_trade_columns = [column for column in trades_df.columns if column.startswith('_')]
         trade_table = dash_table.DataTable(
-            columns=[{'name':c,'id':c} for c in trades_df.columns],
+            columns=trade_columns,
             data=trades_df.to_dict('records'),
             page_size=15,
+            hidden_columns=hidden_trade_columns,
             style_table={'overflowX':'auto'}
         )
     else:
         trade_table = html.Div('No closed trades found.')
+
+    if not trade_orders_df.empty:
+        trade_orders_table = dash_table.DataTable(
+            columns=[{'name':c,'id':c} for c in trade_orders_df.columns],
+            data=trade_orders_df.to_dict('records'),
+            page_size=15,
+            style_table={'overflowX':'auto'}
+        )
+    else:
+        trade_orders_table = html.Div('No trade/order relationships found.')
 
     if not orders_df.empty:
         order_table = dash_table.DataTable(
@@ -1474,15 +1609,52 @@ def update_visual(backtest_folder, _resample_clicks, resample_value, resample_un
         _render_stats_panel(stats),
         *notices
     ])
-    return fig, stats_component, trade_table, extra_blocks, order_table
+    return fig, stats_component, trade_table, trade_orders_table, extra_blocks, order_table
+
+
+@app.callback(
+    Output('entry-exit-visible','data'),
+    Output('toggle-entry-exit','children'),
+    Output('toggle-entry-exit','disabled'),
+    Input('toggle-entry-exit','n_clicks'),
+    Input('backtest-dd','value'),
+    State('entry-exit-visible','data')
+)
+def sync_entry_exit_toggle(n_clicks, backtest_folder, current_visible):
+    """Keep the entry/exit signal toggle aligned with project configuration state."""
+    triggered = callback_context.triggered[0]['prop_id'].split('.')[0] if callback_context.triggered else None
+    if not backtest_folder:
+        return None, 'Entry/Exit Signals (Disabled)', True
+    project_path = os.path.dirname(os.path.dirname(backtest_folder))
+    config_enabled = _entry_exit_enabled_for_project(project_path)
+    if not config_enabled:
+        return None, 'Entry/Exit Signals (Disabled)', True
+    if triggered == 'backtest-dd':
+        visible = True
+    elif triggered == 'toggle-entry-exit':
+        visible = not bool(current_visible) if current_visible is not None else True
+    else:
+        visible = bool(current_visible) if current_visible is not None else True
+    label = 'Entry/Exit Signals: On' if visible else 'Entry/Exit Signals: Off'
+    return visible, label, False
 
 # Register upload callbacks (after app defined)
 register_upload_callbacks(app)
 
+@app.callback(
+    Output('sidebar-panel', 'style'),
+    Output('main-panel', 'style'),
+    Input('toggle-sidebar', 'n_clicks')
+)
+def toggle_sidebar(n_clicks):
+    """Collapse or expand the sidebar based on the toggle button click count."""
+    collapsed = bool((n_clicks or 0) % 2)
+    return _sidebar_style(collapsed), _main_style(collapsed)
+
 if __name__ == '__main__':
     app.run(
-        debug=True, 
-        host='0.0.0.0', 
+        debug=True,
+        host='0.0.0.0',
         port=8050,
         dev_tools_hot_reload=True,
         dev_tools_hot_reload_interval=1000,

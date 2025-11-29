@@ -7,6 +7,7 @@ DATETIME_CANDIDATES = ['datetime','date','time','timestamp']
 THOUSANDS_NUMBER_RE = re.compile(r'((?:^|,)\s*)(\d{1,3}(?:,\d{3})+(?:\.\d+)?)', flags=re.MULTILINE)
 
 def _find_col(cols, names):
+    """Return the first column whose lowercase name matches any alias."""
     lower = {c.lower(): c for c in cols}
     for n in names:
         if n in lower:
@@ -19,6 +20,7 @@ def _find_col(cols, names):
     return None
 
 def _extract_datetime(df):
+    """Derive a pandas datetime Series from common datetime column patterns."""
     cols = list(df.columns)
     # try single datetime col
     single = _find_col(cols, DATETIME_CANDIDATES)
@@ -38,6 +40,7 @@ def _extract_datetime(df):
     raise ValueError('Could not locate datetime column(s). Columns available: ' + ','.join(cols))
 
 def _detect_minute(dt_series: pd.Series) -> bool:
+    """Heuristically determine whether data contains intra-day observations."""
     # minute data will have repeated dates (multiple rows per date)
     if dt_series.isna().all():
         return False
@@ -45,10 +48,12 @@ def _detect_minute(dt_series: pd.Series) -> bool:
     return counts.max() > 1
 
 def _ms_since_midnight(dt: datetime) -> int:
+    """Return milliseconds elapsed since midnight for the supplied timestamp."""
     return (dt.hour * 3600 + dt.minute * 60 + dt.second) * 1000 + int(dt.microsecond/1000)
 
 
 def _scale_price(value) -> int:
+    """Convert a price into Lean's integer scaling (price * 10,000)."""
     if pd.isna(value):
         raise ValueError('Encountered missing price while converting to Lean format.')
     if isinstance(value, (int, float)):
@@ -64,6 +69,7 @@ def _scale_price(value) -> int:
 
 
 def _scale_volume(value) -> int:
+    """Normalize volume strings with optional suffixes into integer units."""
     if pd.isna(value):
         return 0
     if isinstance(value, (int, float)):
@@ -87,6 +93,7 @@ def _scale_volume(value) -> int:
 
 
 def _append_daily_rows(df: pd.DataFrame, col_map: dict, vol_col: str, rows: list[str]):
+    """Append Lean daily CSV rows into ``rows`` for the provided dataframe."""
     ordered = df.dropna(subset=['__dt']).sort_values('__dt')
     for _, record in ordered.iterrows():
         day_key = record['__dt'].strftime('%Y%m%d')
@@ -99,6 +106,7 @@ def _append_daily_rows(df: pd.DataFrame, col_map: dict, vol_col: str, rows: list
 
 
 def _format_timestamp(value) -> str | None:
+    """Format timestamps as ISO8601 strings compatible with Lean uploads."""
     if pd.isna(value):
         return None
     if isinstance(value, pd.Timestamp):
@@ -121,6 +129,7 @@ def _format_timestamp(value) -> str | None:
 
 
 def _clean_price(value) -> float:
+    """Return a float price derived from Lean's scaled integer representation."""
     try:
         return _scale_price(value) / 10000
     except Exception:
@@ -176,8 +185,20 @@ def sanitize_to_strict_csv(raw_bytes: bytes) -> str:
     return output.getvalue()
 
 def convert_equity_minute_to_lean(raw_csv: str, symbol: str):
-    """Parse uploaded raw CSV string and return dict of date->zip bytes ready to write.
-    This helper remains minute-only; the streaming variant handles both minute and daily uploads.
+    """Convert minute-level equity CSV text into Lean zip payloads.
+
+    Parameters
+    ----------
+    raw_csv : str
+        Uploaded CSV content already decoded to text.
+    symbol : str
+        Symbol ticker used to name the emitted files.
+
+    Returns
+    -------
+    dict[str, bytes]
+        Mapping of ``{date}_trade.zip`` -> zip file bytes. Empty when the input
+        is daily rather than minute-granularity.
     """
     df = pd.read_csv(io.StringIO(raw_csv))
     dt = _extract_datetime(df)
@@ -221,13 +242,22 @@ def convert_equity_minute_to_lean(raw_csv: str, symbol: str):
     return outputs
 
 def convert_equity_minute_to_lean_stream(csv_path: str, symbol: str, chunk_rows: int = 250000):
-    """Convert uploaded CSV data into Lean-formatted files.
+    """Stream large CSV uploads and emit Lean-formatted archives.
 
-    Minute inputs emit one `*_trade.zip` per day (same behaviour as before).
-    Daily inputs create a `{symbol}.csv` + `{symbol}.zip` bundle that contains both the
-    Lean CSV and the original upload inside a folder named after the selection.
+    Parameters
+    ----------
+    csv_path : str
+        Path to the uploaded CSV file on disk.
+    symbol : str
+        Symbol used when naming produced files.
+    chunk_rows : int, optional
+        Chunk size used when iterating through the CSV to limit memory usage.
 
-    Returns a dict with shape `{ "mode": "minute"|"daily", "files": [..] }`.
+    Returns
+    -------
+    dict
+        Structure describing the output mode (``minute`` or ``daily``) and a
+        list of generated files with their metadata and bytes.
     """
     result = {"mode": "minute", "files": []}
     try:

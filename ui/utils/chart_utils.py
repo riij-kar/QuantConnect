@@ -12,10 +12,19 @@ __all__ = [
 ]
 
 def extract_series(charts_obj: dict):
-    """Parse LEAN chart JSON into individual pandas Series.
-    Supports OHLC arrays [ts, o, h, l, c] and simple [ts, value] points.
-    Automatically detects epoch seconds numeric timestamps.
-    Keys for OHLC become <Chart>::<Series>::open/high/low/close.
+    """Convert the LEAN ``charts`` payload into a dictionary of Series.
+
+    Parameters
+    ----------
+    charts_obj : dict
+        Parsed JSON object under ``charts`` from Lean backtest results.
+
+    Returns
+    -------
+    dict[str, pandas.Series]
+        Mapping of chart/series identifiers to pandas Series indexed by UTC
+        timestamps. OHLC series use the ``<Chart>::<Series>::component`` naming
+        convention.
     """
     series_map: dict[str, pd.Series] = {}
     if not isinstance(charts_obj, dict):
@@ -71,6 +80,19 @@ def extract_series(charts_obj: dict):
 
 
 def build_price_from_series(series_map):
+    """Assemble a price DataFrame from extracted chart series.
+
+    Parameters
+    ----------
+    series_map : dict[str, pandas.Series]
+        Result of ``extract_series``.
+
+    Returns
+    -------
+    pandas.DataFrame or None
+        DataFrame containing ``open/high/low/close`` columns when available, or
+        a close-only frame. ``None`` when no price series can be found.
+    """
     lower = {k.lower(): k for k in series_map.keys()}
     keys = {part: lower.get(part) for part in ['price::open','price::high','price::low','price::close']}
     if all(v for v in keys.values()):
@@ -87,6 +109,20 @@ def build_price_from_series(series_map):
 
 
 def build_equity_and_drawdown(series_map):
+    """Derive equity curve, drawdown, and returns series from chart data.
+
+    Parameters
+    ----------
+    series_map : dict[str, pandas.Series]
+        Dictionary returned by ``extract_series``.
+
+    Returns
+    -------
+    tuple
+        ``(equity, drawdown, returns)`` where ``equity`` is either an OHLC
+        DataFrame or Series, and the remaining values are Series or ``None`` if
+        not computable.
+    """
     parts = {'open': None,'high': None,'low': None,'close': None}
     for k in list(series_map.keys()):
         kl = k.lower()
@@ -125,6 +161,20 @@ def build_equity_and_drawdown(series_map):
 
 
 def get_chart_series(series_map: dict, chart_prefix: str) -> dict:
+    """Select chart series matching the supplied prefix.
+
+    Parameters
+    ----------
+    series_map : dict[str, pandas.Series]
+        Chart series map produced by ``extract_series``.
+    chart_prefix : str
+        Prefix of the desired chart (e.g., ``"Portfolio Margin"``).
+
+    Returns
+    -------
+    dict[str, pandas.Series]
+        Mapping of simplified names to Series for the requested chart prefix.
+    """
     result = {}
     prefix = chart_prefix.lower() + '::'
     keys = [k for k in series_map.keys() if k.lower().startswith(prefix)]

@@ -1,8 +1,10 @@
 # region imports
 from datetime import datetime, timedelta
+import inspect
 from AlgorithmImports import *
 from utils.indicator_factory import build_indicators
 from utils.strategy_loader import load_strategy
+from utils.candlestick_pattern import CandlestickPatternManager
 import json
 import os
 # endregion
@@ -23,7 +25,17 @@ import os
 
 
 class Algomain(QCAlgorithm):
+    """Lean algorithm entry point wiring strategy, indicators, and logging."""
+
     def Initialize(self):
+        """Configure cash, data subscriptions, strategy bundle, and managers.
+
+        The routine reads ``config.json`` from the algorithm directory to load
+        trading dates, cash settings, and strategy metadata. It wires up
+        indicators, the candlestick pattern tracker, and the strategy bundle
+        (alpha, execution, portfolio, and risk models) before subscribing to a
+        consolidator that drives the alpha workflow.
+        """
         # Read config from algorithm directory
         algo_dir = os.path.dirname(os.path.abspath(__file__))
         config_path = os.path.join(algo_dir, "config.json")
@@ -73,8 +85,48 @@ class Algomain(QCAlgorithm):
 
         self.symbol = self.AddEquity(self.cfg.get("EquityName"), resolution, Market.India).Symbol
         self.indicators = build_indicators(self, self.symbol, self.cfg)
-        self.strategy = load_strategy(self.cfg.get("strategy"))
-        self.strategy.initialize(self, self.indicators)
+        self.pattern_tracker = CandlestickPatternManager(
+            self,
+            self.symbol,
+            algo_dir,
+        )
+        self.strategy_bundle = load_strategy(self.cfg.get("strategy"))
+        self.strategy = self.strategy_bundle.strategy
+
+        if inspect.isclass(self.strategy_bundle.alpha_model):
+            self.strategy_bundle.alpha_model = self.strategy_bundle.alpha_model()
+        if inspect.isclass(self.strategy_bundle.portfolio_model):
+            self.strategy_bundle.portfolio_model = self.strategy_bundle.portfolio_model()
+        if inspect.isclass(self.strategy_bundle.execution_model):
+            self.strategy_bundle.execution_model = self.strategy_bundle.execution_model()
+        if inspect.isclass(self.strategy_bundle.risk_model):
+            self.strategy_bundle.risk_model = self.strategy_bundle.risk_model()
+
+        if hasattr(self.strategy, "initialize"):
+            self.strategy.initialize(self, self.indicators, self.cfg)
+
+        if self.strategy_bundle.alpha_model and hasattr(self.strategy_bundle.alpha_model, "configure"):
+            self.strategy_bundle.alpha_model.configure(
+                algorithm=self,
+                symbol=self.symbol,
+                indicators=self.indicators,
+                config=self.cfg,
+            )
+
+        if self.strategy_bundle.alpha_model:
+            self.SetAlpha(self.strategy_bundle.alpha_model)
+        if self.strategy_bundle.portfolio_model:
+            self.SetPortfolioConstruction(self.strategy_bundle.portfolio_model)
+        if self.strategy_bundle.execution_model:
+            self.SetExecution(self.strategy_bundle.execution_model)
+        if self.strategy_bundle.risk_model and hasattr(self.strategy_bundle.risk_model, "configure"):
+            self.strategy_bundle.risk_model.configure(
+                algorithm=self,
+                symbol=self.symbol,
+                config=self.cfg,
+            )
+        if self.strategy_bundle.risk_model:
+            self.SetRiskManagement(self.strategy_bundle.risk_model)
 
         self.signal_log = []
         self.trade_log = []
@@ -91,17 +143,60 @@ class Algomain(QCAlgorithm):
         self.SubscriptionManager.AddConsolidator(self.symbol, self.consolidator)
 
     def OnDataConsolidated(self, sender, bar):
+        """Update indicators and request new insights from the alpha model.
+
+        Parameters
+        ----------
+        sender : object
+            Source consolidator that produced the aggregated bar.
+        bar : TradeBar
+            Newly consolidated bar representing the configured timeframe.
+        """
         for ind in self.indicators.values():
             ind.Update(bar)
         if not all(i.IsReady for i in self.indicators.values()):
             return
-        signal = self.strategy.generate_signal(bar)
-        if signal:
-            self.MarketOrder(self.symbol, 1 if signal == "long" else -1)
-            self.trade_log.append({"time": str(self.Time), "action": signal, "price": bar.Close})
+
+        alpha_model = getattr(self.strategy_bundle, "alpha_model", None)
+        if not alpha_model:
+            self.Debug("No alpha model configured; skipping insight generation.")
+            return
+
+        insights = alpha_model.Update(self, bar)
+        if insights:
+            self.EmitInsights(*insights)
+            self.Debug(
+                "Emitted insights: "
+                + ", ".join(f"{insight.Symbol} {insight.Direction}" for insight in insights)
+            )
+
+    def OnOrderEvent(self, orderEvent: OrderEvent):
+        """Track fills and echo concise diagnostics to the algorithm log.
+
+        Parameters
+        ----------
+        orderEvent : OrderEvent
+            Lean-provided order event describing fill status and pricing.
+        """
+        if orderEvent.Status not in (OrderStatus.Filled, OrderStatus.PartiallyFilled):
+            return
+        self.trade_log.append(
+            {
+                "time": str(orderEvent.UtcTime),
+                "symbol": str(orderEvent.Symbol),
+                "quantity": orderEvent.FillQuantity,
+                "price": orderEvent.FillPrice,
+                "direction": str(orderEvent.Direction),
+            }
+        )
+        self.Debug(
+            f"OrderEvent logged: {orderEvent.Symbol} {orderEvent.Direction} {orderEvent.FillQuantity} @ {orderEvent.FillPrice}"
+        )
 
     def OnEndOfAlgorithm(self):
-        pass
+        """Flush pattern logs to disk when the backtest or live session ends."""
+        if hasattr(self, "pattern_tracker"):
+            self.pattern_tracker.flush()
         # with open("backtests/trade_log.json", "w") as f:
         #     json.dump(self.trade_log, f, indent=4)
 

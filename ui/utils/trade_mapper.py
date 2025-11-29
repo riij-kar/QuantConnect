@@ -2,11 +2,151 @@ import os, json, numpy as np, pandas as pd
 from datetime import datetime
 from typing import List, Dict, Any
 
-__all__ = ['load_all_json', 'parse_order_events', 'enrich_orders', 'reconstruct_trades', 'build_trade_table', 'build_order_table']
+__all__ = ['load_all_json', 'parse_order_events', 'enrich_orders', 'reconstruct_trades', 'build_trade_table', 'build_order_table', 'build_trade_order_table']
+
+ORDER_TYPE_MAP = {
+    0: "Market",
+    1: "Limit",
+    2: "Stop Market",
+    3: "Stop Limit",
+    4: "Market On Open",
+    5: "Market On Close",
+    6: "Limit If Touched",
+    7: "Stop Market On Close",
+    8: "Trailing Stop",
+    9: "Combo Market",
+    10: "Combo Limit",
+    11: "Combo Leg Limit",
+}
+
+ORDER_STATUS_MAP = {
+    0: "New",
+    1: "Submitted",
+    2: "Partially Filled",
+    3: "Filled",
+    4: "Canceled",
+    5: "None",
+    6: "Invalid",
+    7: "Cancel Pending",
+    8: "Update Submitted",
+    9: "Expired",
+}
+
+SECURITY_TYPE_MAP = {
+    0: "Base",
+    1: "Equity",
+    2: "Option",
+    3: "Commodity",
+    4: "Forex",
+    5: "Future",
+    6: "CFD",
+    7: "Crypto",
+    8: "Crypto Future",
+    9: "Index",
+    10: "Future Option",
+    11: "Index Option",
+    12: "Commodity Option",
+}
+
+ORDER_DIRECTION_MAP = {
+    0: "Buy",
+    1: "Sell",
+    2: "Hold",
+}
+
+
+def _coerce_order_id(value):
+    """Convert arbitrary order identifier payloads into integers.
+
+    Parameters
+    ----------
+    value : Any
+        Value extracted from QC order JSON (can be int, float, string, etc.).
+
+    Returns
+    -------
+    Optional[int]
+        Integer representation when coercion succeeds; ``None`` otherwise.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, float):
+        if np.isnan(value):
+            return None
+        return int(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return int(float(stripped))
+        except Exception:
+            return None
+    return None
+
+
+def _parse_order_ids(raw_value):
+    """Normalize order id fields into a list of integers.
+
+    Parameters
+    ----------
+    raw_value : Any
+        Raw ``orderIds`` payload from trade summaries. Supports single values,
+        strings, JSON-encoded lists, or iterables.
+
+    Returns
+    -------
+    list[int]
+        Cleaned list of integer order identifiers.
+    """
+    if raw_value is None:
+        return []
+    if isinstance(raw_value, list):
+        out = []
+        for item in raw_value:
+            coerced = _coerce_order_id(item)
+            if coerced is not None:
+                out.append(coerced)
+        return out
+    if isinstance(raw_value, (int, np.integer, float)):
+        coerced = _coerce_order_id(raw_value)
+        return [coerced] if coerced is not None else []
+    if isinstance(raw_value, str):
+        stripped = raw_value.strip()
+        if not stripped:
+            return []
+        try:
+            parsed = json.loads(stripped)
+        except Exception:
+            parsed = [part.strip() for part in stripped.split(',') if part.strip()]
+        if isinstance(parsed, list):
+            out = []
+            for item in parsed:
+                coerced = _coerce_order_id(item)
+                if coerced is not None:
+                    out.append(coerced)
+            return out
+        coerced = _coerce_order_id(parsed)
+        return [coerced] if coerced is not None else []
+    return []
 
 # --- JSON loading ---
 
 def load_all_json(backtest_folder: str) -> Dict[str, Any]:
+    """Read every JSON file in a backtest folder into memory.
+
+    Parameters
+    ----------
+    backtest_folder : str
+        Absolute path to a backtest run directory.
+
+    Returns
+    -------
+    dict[str, Any]
+        Mapping of filename -> parsed JSON object (``None`` on errors).
+    """
     out = {}
     for fname in os.listdir(backtest_folder):
         if fname.endswith('.json'):
@@ -20,6 +160,19 @@ def load_all_json(backtest_folder: str) -> Dict[str, Any]:
 # --- Order events ---
 
 def parse_order_events(json_map: Dict[str, Any]) -> pd.DataFrame:
+    """Extract order-event rows from the provided JSON map.
+
+    Parameters
+    ----------
+    json_map : dict[str, Any]
+        Dictionary produced by ``load_all_json``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame of order events with an extra ``dt`` column when timestamps
+        can be parsed. Empty frame when no order-event file is found.
+    """
     # Find first *-order-events.json file
     for name, data in json_map.items():
         if name.endswith('-order-events.json') and isinstance(data, list):
@@ -36,6 +189,19 @@ def parse_order_events(json_map: Dict[str, Any]) -> pd.DataFrame:
 # --- Orders ---
 
 def enrich_orders(json_map: Dict[str, Any]) -> pd.DataFrame:
+    """Load the orders table from summary JSON and expand nested fields.
+
+    Parameters
+    ----------
+    json_map : dict[str, Any]
+        Mapping obtained via ``load_all_json``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Orders DataFrame sorted by ``orderId``. Empty frame when orders are
+        unavailable.
+    """
     # Look for file that has 'orders' top-level (summary or main json)
     for name, data in json_map.items():
         if isinstance(data, dict) and 'orders' in data:
@@ -54,6 +220,18 @@ def enrich_orders(json_map: Dict[str, Any]) -> pd.DataFrame:
 # --- Closed trades (original) ---
 
 def reconstruct_trades(json_map: Dict[str, Any]) -> pd.DataFrame:
+    """Recover closed trades from QC performance JSON payloads.
+
+    Parameters
+    ----------
+    json_map : dict[str, Any]
+        Result of ``load_all_json``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Closed trade records with normalized symbol and datetime columns.
+    """
     # Prefer summary closedTrades
     trades = []
     for name, data in json_map.items():
@@ -81,6 +259,7 @@ def reconstruct_trades(json_map: Dict[str, Any]) -> pd.DataFrame:
 
 
 def _to_json_safe(value):
+    """Convert complex pandas/numpy objects into JSON-serializable values."""
     if isinstance(value, pd.Timestamp):
         return value.isoformat()
     if isinstance(value, np.datetime64):
@@ -117,6 +296,7 @@ def _to_json_safe(value):
 
 
 def _normalize_table_cell(value):
+    """Prepare complex cell values for Dash tables by JSON-encoding them."""
     if isinstance(value, (list, tuple, set, np.ndarray, pd.Series, pd.Index)):
         safe = _to_json_safe(value)
         return json.dumps(safe)
@@ -148,19 +328,30 @@ def _normalize_table_cell(value):
 # --- Enriched tables ---
 
 def build_trade_table(trades_df: pd.DataFrame, orders_df: pd.DataFrame, events_df: pd.DataFrame) -> pd.DataFrame:
+    """Produce a table summarizing trades with aggregated execution context.
+
+    Parameters
+    ----------
+    trades_df : pandas.DataFrame
+        Raw closed trades extracted via ``reconstruct_trades``.
+    orders_df : pandas.DataFrame
+        Orders DataFrame returned by ``enrich_orders``.
+    events_df : pandas.DataFrame
+        Order-events DataFrame produced by ``parse_order_events``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Trade table ready for Dash DataTable consumption.
+    """
     if trades_df.empty:
         return trades_df
-    # Expand trades with orderIds details if present
+    trades_df = trades_df.copy()
+    # Normalize orderIds so downstream aggregations work reliably
     if 'orderIds' in trades_df.columns:
-        # explode orderIds to link orders
-        trades_df['orderIds'] = trades_df['orderIds'].apply(lambda x: x if isinstance(x, list) else [])
-        exploded = trades_df[['orderIds']].explode('orderIds').rename(columns={'orderIds':'orderId'})
-        exploded['orderId'] = exploded['orderId'].astype('Int64')
-        merged_orders = exploded.merge(orders_df, on='orderId', how='left', suffixes=('','_order'))
-        agg_cols = [c for c in merged_orders.columns if c not in ['orderId']]
-        # group back by index (trade row) collecting order detail dicts
-        order_details = merged_orders.groupby(level=0).apply(lambda g: g.to_dict('records'))
-        trades_df['orderDetails'] = order_details
+        normalized_ids = trades_df['orderIds'].apply(_parse_order_ids)
+        trades_df['_orderIdsRaw'] = normalized_ids.apply(lambda ids: ids.copy())
+        trades_df['orderIds'] = normalized_ids
     # Attach aggregated fees from events if available
     if not events_df.empty:
         # keep only rows with orderId
@@ -244,12 +435,29 @@ def build_trade_table(trades_df: pd.DataFrame, orders_df: pd.DataFrame, events_d
     # Sanitize complex types for Dash DataTable (lists/dicts/etc -> JSON string)
     for col in trades_df.columns:
         trades_df[col] = trades_df[col].apply(_normalize_table_cell)
+    if 'orderDetails' in trades_df.columns:
+        trades_df = trades_df.drop(columns=['orderDetails'])
     return trades_df
 
 
 def build_order_table(orders_df: pd.DataFrame, events_df: pd.DataFrame) -> pd.DataFrame:
+    """Augment the raw orders table with enumerations and event aggregates.
+
+    Parameters
+    ----------
+    orders_df : pandas.DataFrame
+        Orders frame produced by ``enrich_orders``.
+    events_df : pandas.DataFrame
+        Order events DataFrame for enrichment.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Orders with human-readable enum columns and aggregate metrics.
+    """
     if orders_df.empty:
         return orders_df
+    orders_df = orders_df.copy()
     # aggregate events per order
     if not events_df.empty:
         # count fills / total quantity filled
@@ -260,6 +468,199 @@ def build_order_table(orders_df: pd.DataFrame, events_df: pd.DataFrame) -> pd.Da
         if 'dt' in events_df.columns:
             last_fill = events_df.groupby('orderId')['dt'].max().rename('lastEventTime')
             orders_df = orders_df.merge(last_fill, on='orderId', how='left')
+
+    def _map_enum(value, mapping):
+        if value is None:
+            return None
+        if isinstance(value, float) and np.isnan(value):
+            return None
+        try:
+            if isinstance(value, str) and value.isdigit():
+                key = int(value)
+            else:
+                key = int(value)
+        except Exception:
+            return value
+        return mapping.get(key, str(value))
+
+    if 'type' in orders_df.columns:
+        orders_df['type'] = orders_df['type'].apply(lambda v: _map_enum(v, ORDER_TYPE_MAP))
+    if 'status' in orders_df.columns:
+        orders_df['status'] = orders_df['status'].apply(lambda v: _map_enum(v, ORDER_STATUS_MAP))
+    if 'securityType' in orders_df.columns:
+        orders_df['securityType'] = orders_df['securityType'].apply(lambda v: _map_enum(v, SECURITY_TYPE_MAP))
+    if 'direction' in orders_df.columns:
+        orders_df['direction'] = orders_df['direction'].apply(lambda v: _map_enum(v, ORDER_DIRECTION_MAP))
+
+    if 'symbol' in orders_df.columns:
+        def _symbol_value(val):
+            if isinstance(val, dict):
+                return val.get('value') or val.get('Value') or val.get('permtick') or json.dumps(val)
+            return val
+        orders_df['symbol'] = orders_df['symbol'].apply(_symbol_value)
+
+    if 'tag' in orders_df.columns:
+        orders_df = orders_df.drop(columns=['tag'])
+
     for col in orders_df.columns:
         orders_df[col] = orders_df[col].apply(_normalize_table_cell)
     return orders_df
+
+
+def build_trade_order_table(trades_df: pd.DataFrame, orders_df: pd.DataFrame) -> pd.DataFrame:
+    """Combine trades and orders into a flattened trade-order join table.
+
+    Parameters
+    ----------
+    trades_df : pandas.DataFrame
+        Trade table returned by ``build_trade_table``.
+    orders_df : pandas.DataFrame
+        Enriched order table from ``build_order_table``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Row-per-trade-order pairing, suitable for drilling into execution
+        history within Dash tables.
+    """
+    if trades_df.empty:
+        return pd.DataFrame()
+
+    trade_records = trades_df.to_dict('records')
+    if not trade_records:
+        return pd.DataFrame()
+
+    order_lookup: Dict[Any, Dict[str, Any]] = {}
+    if not orders_df.empty:
+        for record in orders_df.to_dict('records'):
+            key = record.get('orderId')
+            candidates = [key]
+            coerced = _coerce_order_id(key)
+            if coerced is not None:
+                candidates.extend([coerced, str(coerced)])
+            if isinstance(key, str):
+                trimmed = key.strip()
+                if trimmed and trimmed not in candidates:
+                    candidates.append(trimmed)
+            for cand in candidates:
+                if cand in (None, ''):
+                    continue
+                order_lookup[cand] = record
+
+    trade_field_map = [
+        ('symbol', 'tradeSymbol'),
+        ('direction', 'tradeDirection'),
+        ('entryTime', 'tradeEntryTime'),
+        ('exitTime', 'tradeExitTime'),
+        ('quantity', 'tradeQuantity'),
+        ('profitLoss', 'tradeProfitLoss'),
+        ('realizedPnL', 'tradeRealizedPnL'),
+        ('eventsFees', 'tradeFees'),
+        ('filledQuantity', 'tradeFilledQuantity'),
+        ('filledVWAP', 'tradeFilledVWAP'),
+        ('buyQty', 'tradeBuyQty'),
+        ('sellQty', 'tradeSellQty'),
+        ('buyVWAP', 'tradeBuyVWAP'),
+        ('sellVWAP', 'tradeSellVWAP'),
+        ('limitPrices', 'tradeLimitPrices'),
+        ('sides', 'tradeSides'),
+    ]
+    order_field_map = [
+        ('status', 'orderStatus'),
+        ('type', 'orderType'),
+        ('direction', 'orderDirection'),
+        ('quantity', 'orderQuantity'),
+        ('filledQuantity', 'orderFilledQuantity'),
+        ('limitPrice', 'orderLimitPrice'),
+        ('stopPrice', 'orderStopPrice'),
+        ('lastEventTime', 'orderLastEventTime'),
+        ('lastFillTime', 'orderLastFillTime'),
+        ('time', 'orderTime'),
+        ('createdTime', 'orderCreatedTime'),
+        ('securityType', 'orderSecurityType'),
+        ('symbol', 'orderSymbol'),
+    ]
+
+    combined_rows: List[Dict[str, Any]] = []
+    for index, trade in enumerate(trade_records, start=1):
+        raw_ids = trade.get('_orderIdsRaw', trade.get('orderIds'))
+        order_ids = _parse_order_ids(raw_ids)
+        total_orders = len(order_ids)
+        if not order_ids:
+            row = {
+                'tradeIndex': index,
+                'orderSequence': None,
+                'orderCount': 0,
+                'orderId': None
+            }
+            for source, target in trade_field_map:
+                if source in trade:
+                    row[target] = trade[source]
+            combined_rows.append(row)
+            continue
+        for sequence, order_id in enumerate(order_ids, start=1):
+            order_data = order_lookup.get(order_id) or order_lookup.get(str(order_id))
+            row = {
+                'tradeIndex': index,
+                'orderSequence': sequence,
+                'orderCount': total_orders,
+            }
+            for source, target in trade_field_map:
+                if source in trade:
+                    row[target] = trade[source]
+            if order_data:
+                row['orderId'] = order_data.get('orderId', order_id)
+                for source, target in order_field_map:
+                    if source in order_data:
+                        row[target] = order_data[source]
+            else:
+                row['orderId'] = order_id
+            combined_rows.append(row)
+
+    if not combined_rows:
+        return pd.DataFrame()
+
+    combined_df = pd.DataFrame(combined_rows)
+    if not combined_df.empty:
+        combined_df = combined_df.sort_values(['tradeIndex', 'orderSequence'], na_position='last').reset_index(drop=True)
+        for col in combined_df.columns:
+            combined_df[col] = combined_df[col].apply(_normalize_table_cell)
+        preferred_order = [
+            'tradeIndex',
+            'orderSequence',
+            'orderCount',
+            'tradeSymbol',
+            'tradeDirection',
+            'tradeEntryTime',
+            'tradeExitTime',
+            'tradeQuantity',
+            'tradeProfitLoss',
+            'tradeRealizedPnL',
+            'tradeFees',
+            'tradeFilledQuantity',
+            'tradeFilledVWAP',
+            'tradeLimitPrices',
+            'tradeSides',
+            'tradeBuyQty',
+            'tradeBuyVWAP',
+            'tradeSellQty',
+            'tradeSellVWAP',
+            'orderId',
+            'orderStatus',
+            'orderType',
+            'orderDirection',
+            'orderQuantity',
+            'orderFilledQuantity',
+            'orderLimitPrice',
+            'orderStopPrice',
+            'orderLastEventTime',
+            'orderLastFillTime',
+            'orderTime',
+            'orderCreatedTime',
+            'orderSecurityType',
+            'orderSymbol',
+        ]
+        existing = [c for c in preferred_order if c in combined_df.columns]
+        remaining = [c for c in combined_df.columns if c not in existing]
+        combined_df = combined_df[existing + remaining]
+    return combined_df

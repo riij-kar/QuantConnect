@@ -1,0 +1,286 @@
+Question::::::::::::::::::::::
+
+I want to integrate buying algo in QC lean. My strtaegy is entry when price closed above ema 21 and trail it . minimum capture 20points and rest trail it, trail it until price closed below previous candle low. For exit condition take stoploss 10 points. But during this time while backtesting QC is generating multiple signals after entry because condition is still valid after entry and few candles, wanted to avoid that multiple generating entry when one is active. To avoid that i wanted to look for states. States means something like how human normally trades, suppose an individual enter  a trade. Humans dont take entry when there is flat market or price is getting lower low, closed above ema21 is best when price not making lower but oscilates few candles before. then he have two choices exit (sl and target) and entry(after analyzing certain conditions). Entry is fine but after entry there are many things to check to manage the trade, like minimum risk reward is 1:2 and trail it for 1:3/1:4/1:5 and so on. next is looking for exit, suppose closed below previous candle. 
+
+This is the general idea i just given i am looking for multiple things to be check, i wanted to hear from you that how can we proceed with such thing? What i need to implement for remove the noise, how to check if the prices is not going down trend. Normal coding is fine, or some machine learning we need to implement in QC. 
+
+
+
+Answer::::::::::::::::::::::::
+Nice — this is exactly the kind of disciplined, production-ready behavior you want. Below I’ll:
+
+1. Describe a clear **state-machine** design that models how a human trades your rules.
+2. Give **concrete coding patterns** (QuantConnect / Lean Python) you can drop into your `main.py`.
+3. Show how to prevent re-entry after an active position and how to manage the trailing and exits you described.
+4. Mention a few practical **noise-reduction** and robustness improvements (filters, cooldowns, partial exits).
+5. Offer to patch your actual `main.py` (I see you uploaded one at `/mnt/data/main.py`) if you want — I can produce the modified file.
+
+**File you uploaded (I can patch this if you want):** `/mnt/data/main.py`
+
+---
+
+# 1) High-level design (state machine)
+
+Use a finite-state machine per symbol with states and transitions that map to human behavior:
+
+States:
+
+* `IDLE` — no active trade, scanning for **confirmed** entry
+* `CONFIRMING` — candidate signal seen; waiting for confirmation (edge condition / stable bars / no lower-lows)
+* `ENTERED` — position filled; now manage via trailing rules
+* `MANAGED` — actively trailing; taking partials if target hit
+* `EXITED` — trade closed; start cooldown
+
+Transitions (examples):
+
+* `IDLE -> CONFIRMING` : `close > EMA21` AND no recent lower-lows AND optional volume/adx filter
+* `CONFIRMING -> ENTERED` : confirmation persists (e.g., not making new lower low for N bars OR next bar also meets condition)
+* `ENTERED -> MANAGED` : initial min-capture (20 points) or immediately start trailing
+* `MANAGED -> EXITED` : stoploss hit (10 points) OR trailing rule triggers (close below previous bar low)
+* `ENTERED or MANAGED -> IDLE` : after exit and cooldown
+
+Key ideas:
+
+* Only act on **edge** (condition becomes true), not while it stays true.
+* Use `Transactions.GetOpenOrders()` and `Portfolio[symbol].Invested` checks to avoid duplicates.
+* Use `OnOrderEvent` to update state when fills happen.
+* Use time-based **cooldown** and **min-duration** guards to prevent immediate re-entry.
+
+---
+
+# 2) Concrete QC/Lean Python implementation (drop-in snippets)
+
+These snippets implement the core ideas. Integrate into your algorithm's `Initialize`, `OnDataConsolidated`, and `OnOrderEvent`.
+
+Add these top-level imports and enums:
+
+```python
+from datetime import timedelta
+from QuantConnect import OrderStatus
+
+class TradeState:
+    IDLE = "IDLE"
+    CONFIRMING = "CONFIRMING"
+    ENTERED = "ENTERED"
+    MANAGED = "MANAGED"
+    EXITED = "EXITED"
+```
+
+Initialize state variables in `Initialize()`:
+
+```python
+self.trade_state = {}            # symbol -> state
+self.state_data = {}             # symbol -> dict for entry_price, sl, last_entry_time, ticket, etc.
+self.confirm_bars_required = 1   # require how many consecutive confirmation bars (1 or 2)
+self.cooldown = timedelta(minutes=5)
+self.min_capture_points = 20.0
+self.stop_loss_points = 10.0
+self.trailing_active = {}        # symbol->bool
+self.previous_bar = {}          # symbol -> last consolidated bar
+# example filters:
+self.adx_threshold = 25         # avoid trending days if ADX > this
+self.volume_ma_period = 20
+```
+
+Helper functions:
+
+```python
+def set_state(self, symbol, state):
+    self.trade_state[symbol] = state
+    self.state_data.setdefault(symbol, {})
+    self.state_data[symbol]['state_changed_time'] = self.Time
+
+def can_enter(self, symbol):
+    # basic guards
+    if self.Portfolio[symbol].Invested:
+        return False
+    if self.Transactions.GetOpenOrders(symbol):
+        return False
+    last = self.state_data.get(symbol, {}).get('last_exit_time')
+    if last and (self.Time - last) < self.cooldown:
+        return False
+    return True
+```
+
+`OnDataConsolidated` skeleton (where you create signal and run state machine):
+
+```python
+def OnDataConsolidated(self, sender, bar):
+    symbol = bar.Symbol
+    s = symbol.Value
+    # update prev bar
+    prev = self.previous_bar.get(s)
+    self.previous_bar[s] = bar
+
+    # build indicators (ema21, vwap, adx, vol_ma) before this point
+    ema21 = self.indicators[s]['ema21'].Current.Value
+    vwap = self.indicators[s]['vwap'].Current.Value
+    vol = bar.Volume
+    vol_ma = self.indicators[s]['vol_ma'].Current.Value if 'vol_ma' in self.indicators[s] else None
+    adx = self.indicators[s].get('adx').Current.Value if 'adx' in self.indicators[s] else None
+
+    # 1) Basic signal condition (entry)
+    closed_above = bar.Close > ema21 and ema21 > vwap
+
+    # 2) no-lower-lows confirmation: check last N bars are not making lower lows
+    def not_making_lower_lows(n=3):
+        # quick check using recent history
+        # This example assumes you can query history or track a small deque per symbol
+        history = self.recent_bars[s]  # deque of last n bars including current
+        lows = [b.Low for b in history]
+        # ensure monotonic non-decreasing minima in the recent window
+        return lows[-1] >= min(lows[:-1])  # last low not below earlier minima
+
+    state = self.trade_state.get(s, TradeState.IDLE)
+
+    # EDGE DETECTION: detect rising-edge
+    prev_sig = self.state_data.get(s, {}).get('last_signal', False)
+    curr_sig = closed_above and not_making_lower_lows(3) and (adx is None or adx < self.adx_threshold)
+    self.state_data.setdefault(s, {})['last_signal'] = curr_sig
+
+    # State transitions:
+    if state == TradeState.IDLE:
+        if curr_sig and self.can_enter(s):
+            # move to CONFIRMING for N bars
+            self.state_data[s]['confirm_count'] = 1
+            self.set_state(s, TradeState.CONFIRMING)
+    elif state == TradeState.CONFIRMING:
+        # increase confirm count if still valid; else -> IDLE
+        if curr_sig:
+            self.state_data[s]['confirm_count'] += 1
+            if self.state_data[s]['confirm_count'] >= self.confirm_bars_required:
+                # final check and enter
+                if self.can_enter(s):
+                    qty = self.CalculateOrderQuantity(s, 0.1)  # or fixed qty
+                    ticket = self.MarketOrder(s, qty)
+                    self.state_data[s]['entry_ticket'] = ticket
+                    self.state_data[s]['attempted_entry_time'] = self.Time
+                    # do NOT set ENTERED until fill occurs in OnOrderEvent
+                else:
+                    self.set_state(s, TradeState.IDLE)
+        else:
+            self.set_state(s, TradeState.IDLE)
+
+    elif state == TradeState.ENTERED:
+        # entry recorded; start trailing or check min capture
+        data = self.state_data[s]
+        entry_price = data['entry_price']
+        # compute unrealized points
+        unreal_points = bar.Close - entry_price
+        if unreal_points >= self.min_capture_points:
+            # move to MANAGED -> enable trailing
+            self.set_state(s, TradeState.MANAGED)
+            self.trailing_active[s] = True
+            # example: take small partial here if you want
+        # stoploss check (absolute)
+        if bar.Close <= entry_price - self.stop_loss_points:
+            # issue exit
+            self.Liquidate(s)
+    elif state == TradeState.MANAGED:
+        # trailing rule: update stop to previous candle low if higher than existing stop
+        prev_low = prev.Low if prev else None
+        if prev_low:
+            # compute new stop candidate
+            current_stop = self.state_data[s].get('sl_price')
+            new_sl = max(current_stop, prev_low) if current_stop else prev_low
+            # only move stop up (for long)
+            if not current_stop or new_sl > current_stop:
+                self.state_data[s]['sl_price'] = new_sl
+                # place stop order (or manage in OnData minute-by-minute)
+                # Use StopMarketOrder to set protective stop
+                self.StopMarketOrder(s, -self.Portfolio[s].Quantity, new_sl)
+        # exit when candle close below previous candle low (your rule)
+        if bar.Close < prev.Low:
+            self.Liquidate(s)
+```
+
+`OnOrderEvent` to finalize entry and update state:
+
+```python
+def OnOrderEvent(self, orderEvent):
+    s = orderEvent.Symbol.Value
+    if orderEvent.Status == OrderStatus.Filled:
+        # if entry filled:
+        if orderEvent.FillQuantity > 0:  # positive qty = long entry
+            # record entry price and transition to ENTERED
+            self.state_data.setdefault(s, {})['entry_price'] = orderEvent.FillPrice
+            self.state_data[s]['entry_qty'] = orderEvent.FillQuantity
+            self.set_state(s, TradeState.ENTERED)
+            # set initial stoploss 10 points below entry
+            self.state_data[s]['sl_price'] = orderEvent.FillPrice - self.stop_loss_points
+            # place a StopMarket for the initial stop (optional)
+            self.StopMarketOrder(orderEvent.Symbol, -orderEvent.FillQuantity, self.state_data[s]['sl_price'])
+        else:
+            # fill with negative quantity means exit; mark exit time and move to EXITED
+            self.state_data[s]['last_exit_time'] = self.Time
+            self.set_state(s, TradeState.EXITED)
+            self.trailing_active[s] = False
+            # optionally record PnL etc.
+    elif orderEvent.Status in (OrderStatus.Canceled, OrderStatus.Invalid):
+        # clear pending ticket
+        if 'entry_ticket' in self.state_data.get(s, {}):
+            del self.state_data[s]['entry_ticket']
+        # if invalid cancel, go back to IDLE
+        self.set_state(s, TradeState.IDLE)
+```
+
+Notes:
+
+* `StopMarketOrder` usage will create a stop order; you can also track SL in `OnData` and `Liquidate` when triggered.
+* Use absolute point arithmetic: if trading options you might use price points; for index, points are index points — adjust units accordingly.
+
+---
+
+# 3) How this prevents multiple re-entries
+
+* You only transition from `CONFIRMING -> ENTERED` when **a fill** occurs (OnOrderEvent sets `ENTERED`). That avoids the situation where the entry condition stays true and the algorithm keeps sending new MarketOrders while the previous one is being filled.
+* `can_enter()` checks `Portfolio.Invested` and `Transactions.GetOpenOrders()`; combined with state machine, this prevents duplicate submissions.
+* `EDGE DETECTION` and `CONFIRMING` prevent immediate re-entry due to persistent signal.
+* `cooldown` after `EXITED` prevents immediate new entries.
+
+---
+
+# 4) Noise reduction & practical filters (must-haves)
+
+Apply these to reduce false signals:
+
+* **Trend filter (ADX)**: require ADX < threshold for mean-reversion entries.
+* **Volume filter**: require bar.Volume > VolumeMA * factor OR the market-wide liquidity threshold.
+* **Time-of-day**: disable entries in first 10 and last 30 minutes; avoid expiry-hour for options.
+* **No lower-lows requirement**: ensure the last N bars' lows are not decreasing (or require higher-highs/higher-lows pattern).
+* **Signal cooldown**: 3–10 minutes after exit before new entry.
+* **Max concurrent positions**: limit to 1 per symbol or global cap.
+* **Partial profit taking**: capture min 20 points: take `partial` at +20, reduce size and trail remainder.
+
+---
+
+# 5) Do you need Machine Learning?
+
+Not necessary initially. A deterministic state machine + robust filters will solve the duplicate-entry problem and manage trades as you described. ML can help later for:
+
+* regime detection (trend vs mean-reversion classifier)
+* predicting the probability of reaching the min-capture before SL
+* dynamic stop/target sizing based on microstructure features
+
+Start with rules; add ML only after logging many trades and building labeled datasets.
+
+---
+
+# 6) Testing tips
+
+* Add debug logging at state transitions and order events (`self.Debug(...)`) to confirm behavior in backtest.
+* Simulate partial fills by inserting artificial delays (e.g., treat fills as happening 1-2 bars after order) to ensure no race conditions.
+* Validate with a small sample of live paper trading after backtest.
+
+---
+
+# 7) I can patch your uploaded `main.py`
+
+You uploaded `/mnt/data/main.py`. If you want, I’ll produce a modified version that:
+
+* Implements the per-symbol state machine above
+* Adds `OnOrderEvent` logic
+* Adds the confirmation + cooldown + non-lower-low logic
+* Adds trailing-by-prev-candle-low and initial SL/partial exit logic
+
+Tell me **“Patch /mnt/data/main.py”** and I’ll return the updated file ready to run in your local LEAN environment.

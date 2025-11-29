@@ -4,6 +4,7 @@ from typing import List, Dict
 DATA_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'data'))
 
 def safe_join(base: str, *paths: str) -> str:
+    """Join path components and reject attempts to escape the base directory."""
     joined = os.path.abspath(os.path.join(base, *paths))
     if not joined.startswith(os.path.abspath(base)):
         raise ValueError('Path traversal detected')
@@ -32,11 +33,13 @@ def list_dir(path: str, max_entries: int = 200) -> List[Dict]:
     return entries
 
 def ensure_folder(path: str) -> str:
+    """Create the folder under DATA_ROOT if it does not already exist."""
     abs_path = safe_join(DATA_ROOT, path)
     os.makedirs(abs_path, exist_ok=True)
     return abs_path
 
 def save_csv(path: str, filename: str, content: str) -> str:
+    """Persist CSV content under DATA_ROOT and return the absolute file path."""
     ensure_folder(path)
     abs_target = safe_join(DATA_ROOT, path, filename)
     with open(abs_target, 'w', newline='') as f:

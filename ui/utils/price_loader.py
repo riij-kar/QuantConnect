@@ -14,6 +14,7 @@ SYMBOL_VALUE_RE = re.compile(r'"symbolValue"\s*:\s*"([^"]+)"')
 
 
 def _symbol_from_order_events(backtest_folder: Optional[str]) -> Optional[str]:
+    """Infer the traded symbol by scanning order-event JSON files."""
     if not backtest_folder:
         return None
     try:
@@ -56,18 +57,30 @@ def _symbol_from_order_events(backtest_folder: Optional[str]) -> Optional[str]:
 
 
 def load_ohlcv_from_csv(project_path: str, data_root: str, backtest_folder: Optional[str] = None) -> Tuple[Optional[pd.DataFrame], Optional[str], Dict[str, str]]:
-    """
-    REQUIRED CSV FORMAT (strict):
-    - Header: datetime,open,high,low,close,volume  (all lowercase, comma-separated)
-    - datetime values parseable by pandas.to_datetime with utc=True
-    - All OHLC columns numeric; volume numeric (can be empty)
+    """Load Lean-formatted OHLCV data for the symbol inferred from a backtest.
 
-    Loader behavior:
-        - Derives the symbol from the selected backtest's *-order-events.json
-        - Finds a folder named exactly as that symbol (case-insensitive) under data_root
-    - Inside that folder, picks the newest file named original*.csv
-    - Reads the CSV and validates strict columns; returns (df, path, diag)
-      where diag has an 'error' and 'needed_format' on failure.
+    Parameters
+    ----------
+    project_path : str
+        Absolute path to the QC project (unused, kept for caller symmetry).
+    data_root : str
+        Root of the local ``data`` directory containing Lean-formatted CSVs.
+    backtest_folder : str, optional
+        Selected backtest directory used to infer the symbol via order events.
+
+    Returns
+    -------
+    tuple
+        ``(df, csv_path, diag)`` where ``df`` is a cleaned OHLCV DataFrame or
+        ``None`` when loading fails, ``csv_path`` is the path to the file that
+        was attempted, and ``diag`` carries diagnostic details (error message,
+        required format, and symbol hints).
+
+    Notes
+    -----
+    The loader expects CSV files with the strict header
+    ``datetime,open,high,low,close,volume`` and numeric OHLC values. The most
+    recently modified ``original*.csv`` file within the symbol folder is used.
     """
     symbol = _symbol_from_order_events(backtest_folder)
     diag: Dict[str, str] = {}
