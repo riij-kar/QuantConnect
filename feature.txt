@@ -284,3 +284,105 @@ You uploaded `/mnt/data/main.py`. If you want, I’ll produce a modified version
 * Adds trailing-by-prev-candle-low and initial SL/partial exit logic
 
 Tell me **“Patch /mnt/data/main.py”** and I’ll return the updated file ready to run in your local LEAN environment.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+1. Highs/Lows
+
+Higher High (HH)
+
+Higher Low (HL)
+
+Lower High (LH)
+
+Lower Low (LL)
+
+Equal High (EH)
+
+Equal Low (EL)
+
+Swing High / Swing Low
+
+Internal vs External Swings (ICT concept)
+
+
+2. Trend Concepts
+
+Uptrend
+
+HH + HL sequence
+
+Downtrend
+
+LH + LL sequence
+
+Range / Consolidation / Flat Market
+
+Trend Reversal
+
+Trend Continuation
+
+Trend Exhaustion
+
+Micro Trend / Macro Trend
+
+
+6. Trend Strength Concepts
+
+Pullback
+
+Retracement
+
+Correction
+
+Continuation Leg
+
+Impulse Leg
+
+Expansion
+
+Contraction
+
+
+
+11. Reversal Concepts
+
+Double Top/Bottom
+
+Head and Shoulders
+
+Inverse Head and Shoulders
+
+Rounding Top/Bottom
+
+Engulfing Reversal
+
+Break + Retest
+
+
+12. Support/Resistance Concepts
+
+Horizontal Support / Resistance
+
+Dynamic Support (EMA21/EMA50/VWAP)
+
+Pivot Points
+
+Key Swing Levels
+
+Weekly/Monthly High/Low
