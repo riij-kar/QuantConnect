@@ -9,6 +9,8 @@
     };
     var VWAP_COLOR = '#000000';
 
+    var CONTROL_STYLE_ID = 'tv-lite-controls-styles';
+
     function hashString(str) {
         var hash = 0;
         if (!str) {
@@ -19,6 +21,141 @@
             hash |= 0; // Convert to 32bit integer
         }
         return hash;
+    }
+
+    function injectControlStyles() {
+        if (document.getElementById(CONTROL_STYLE_ID)) {
+            return;
+        }
+        var style = document.createElement('style');
+        style.id = CONTROL_STYLE_ID;
+        style.textContent = '' +
+            '.tv-lite-controls{position:absolute;left:50%;bottom:18px;transform:translateX(-50%);' +
+            'display:flex;gap:6px;padding:6px 8px;background:rgba(17,24,39,0.75);' +
+            'border-radius:8px;box-shadow:0 12px 24px -16px rgba(15,23,42,0.55);z-index:40;}' +
+            '.tv-lite-controls button{border:0;border-radius:6px;background:#1f2937;color:#f8fafc;' +
+            'padding:6px 10px;font-size:12px;font-weight:600;cursor:pointer;line-height:1;' +
+            'transition:background 0.2s ease, transform 0.2s ease;}' +
+            '.tv-lite-controls button:hover{background:#334155;transform:translateY(-1px);}' +
+            '.tv-lite-controls button:active{transform:translateY(0);background:#0f172a;}' +
+            '.tv-lite-controls button:disabled{opacity:0.45;cursor:default;transform:none;background:#1f2937;}';
+        document.head.appendChild(style);
+    }
+
+    function createControlButton(label, title, handler) {
+        var button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = label;
+        button.title = title;
+        button.addEventListener('click', function (event) {
+            event.preventDefault();
+            if (typeof handler === 'function') {
+                handler();
+            }
+        });
+        return button;
+    }
+
+    function attachControls(container, instance) {
+        if (!container || !instance) {
+            return null;
+        }
+        injectControlStyles();
+        var toolbar = document.createElement('div');
+        toolbar.className = 'tv-lite-controls';
+        container.appendChild(toolbar);
+
+        function adjustZoom(factorMultiplier) {
+            if (!instance.chart || !instance.chart.timeScale) {
+                return;
+            }
+            var scale = instance.chart.timeScale();
+            if (!scale || typeof scale.getVisibleLogicalRange !== 'function') {
+                return;
+            }
+            var range = scale.getVisibleLogicalRange();
+            if (!range || typeof range.from !== 'number' || typeof range.to !== 'number') {
+                return;
+            }
+            var length = range.to - range.from;
+            if (!isFinite(length) || length <= 0) {
+                return;
+            }
+            var midpoint = range.from + length / 2;
+            var nextLength = length * factorMultiplier;
+            if (!isFinite(nextLength) || nextLength <= 0) {
+                return;
+            }
+            var nextRange = { from: midpoint - nextLength / 2, to: midpoint + nextLength / 2 };
+            if (typeof scale.setVisibleLogicalRange === 'function') {
+                scale.setVisibleLogicalRange(nextRange);
+            }
+        }
+
+        function scrollBy(percent) {
+            if (!instance.chart || !instance.chart.timeScale) {
+                return;
+            }
+            var scale = instance.chart.timeScale();
+            if (!scale || typeof scale.getVisibleLogicalRange !== 'function') {
+                return;
+            }
+            var range = scale.getVisibleLogicalRange();
+            if (!range || typeof range.from !== 'number' || typeof range.to !== 'number') {
+                return;
+            }
+            var length = range.to - range.from;
+            if (!isFinite(length) || length <= 0) {
+                return;
+            }
+            var shift = length * percent;
+            var nextRange = { from: range.from + shift, to: range.to + shift };
+            if (typeof scale.setVisibleLogicalRange === 'function') {
+                scale.setVisibleLogicalRange(nextRange);
+            }
+        }
+
+        var buttons = [
+            {
+                label: '-',
+                title: 'Zoom Out',
+                handler: function () { adjustZoom(1.35); }
+            },
+            {
+                label: '+',
+                title: 'Zoom In',
+                handler: function () { adjustZoom(0.7); }
+            },
+            {
+                label: '<',
+                title: 'Scroll Left',
+                handler: function () { scrollBy(-0.35); }
+            },
+            {
+                label: '>',
+                title: 'Scroll Right',
+                handler: function () { scrollBy(0.35); }
+            },
+            {
+                label: 'Reset',
+                title: 'Fit Visible Range',
+                handler: function () {
+                    if (instance && instance.chart && typeof instance.chart.timeScale === 'function') {
+                        var scale = instance.chart.timeScale();
+                        if (scale && typeof scale.fitContent === 'function') {
+                            scale.fitContent();
+                        }
+                    }
+                }
+            }
+        ];
+
+        buttons.forEach(function (spec) {
+            toolbar.appendChild(createControlButton(spec.label, spec.title, spec.handler));
+        });
+
+        instance.__controlsToolbar = toolbar;
+        return toolbar;
     }
 
     function colorFor(name) {
@@ -151,6 +288,7 @@
             var options = props && props.chartOptions ? props.chartOptions : {};
             instance.chart = lightweight.createChart(container, options);
             instance.library = lightweight;
+            attachControls(container, instance);
 
             var candlesOptions = props && props.candlesOptions ? props.candlesOptions : {};
             if (typeof instance.chart.addCandlestickSeries === 'function') {
@@ -445,6 +583,10 @@
         if (instance.chart) {
             instance.chart.remove();
         }
+        if (instance.__controlsToolbar && instance.__controlsToolbar.parentNode) {
+            instance.__controlsToolbar.parentNode.removeChild(instance.__controlsToolbar);
+        }
+        instance.__controlsToolbar = null;
     }
 
     global.TradingViewPriceVolume = {

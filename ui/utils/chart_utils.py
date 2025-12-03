@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING, Union
 
 import numpy as np
 import pandas as pd
@@ -8,6 +8,9 @@ import pandas as pd
 #build_lightweight_price_payload
 #build_lightweight_overlay_payload
 #build_lightweight_markers
+if TYPE_CHECKING:
+    from utils.visual_indicators import IndicatorBundle
+
 __all__ = [
     'extract_series',
     'build_price_from_series',
@@ -15,7 +18,8 @@ __all__ = [
     'get_chart_series',
     'build_lightweight_price_payload',
     'build_lightweight_overlay_payload',
-    'build_lightweight_markers'
+    'build_lightweight_markers',
+    'build_echarts_indicator_payload'
 ]
 
 def extract_series(charts_obj: dict):
@@ -208,7 +212,7 @@ def get_chart_series(series_map: dict, chart_prefix: str) -> dict:
         result[name] = ser
     return result
 
-#transform helpers for lightweight-charts
+ #transform helpers for lightweight-charts
 def _timestamp_to_epoch_seconds(value: Any, assume_timezone: Optional[str] = None) -> Optional[int]:
     """Return Unix epoch seconds for the supplied timestamp.
 
@@ -246,6 +250,38 @@ def _timestamp_to_epoch_seconds(value: Any, assume_timezone: Optional[str] = Non
     timestamp = timestamp.tz_convert('UTC')
     return int(timestamp.timestamp())
 
+
+def _timestamp_to_iso8601(value: Any, assume_timezone: Optional[str] = None) -> Optional[str]:
+    """Return ISO-8601 timestamp string (naive) for the supplied value."""
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return None
+    if isinstance(value, pd.Timestamp):
+        timestamp = value
+    else:
+        try:
+            timestamp = pd.to_datetime(value, errors='coerce')
+        except Exception:
+            return None
+    if timestamp is pd.NaT or pd.isna(timestamp):
+        return None
+    if timestamp.tzinfo is None:
+        if assume_timezone:
+            try:
+                timestamp = timestamp.tz_localize(assume_timezone)
+            except Exception:
+                timestamp = timestamp.tz_localize('UTC')
+        else:
+            timestamp = timestamp.tz_localize('UTC')
+    elif assume_timezone:
+        try:
+            timestamp = timestamp.tz_convert(assume_timezone)
+        except Exception:
+            timestamp = timestamp.tz_convert('UTC')
+    else:
+        timestamp = timestamp.tz_convert('UTC')
+    timestamp = timestamp.tz_localize(None)
+    return timestamp.isoformat()
+
 #transform helpers for lightweight-charts
 def _to_float(value: Any) -> Optional[float]:
     """Safely coerce a scalar to ``float`` while tolerating missing values."""
@@ -261,7 +297,7 @@ def _to_float(value: Any) -> Optional[float]:
     except (TypeError, ValueError):
         return None
 
-#transform helpers for lightweight-charts
+ #transform helpers for lightweight-charts
 def build_lightweight_price_payload(price_df: Optional[pd.DataFrame], assume_timezone: Optional[str] = None) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Transform ``price_df`` into lightweight-charts candle and volume arrays.
 
@@ -317,7 +353,7 @@ def build_lightweight_price_payload(price_df: Optional[pd.DataFrame], assume_tim
 
     return candles, volume
 
-#transform helpers for lightweight-charts
+ #transform helpers for lightweight-charts
 def _series_to_lightweight(series: Optional[pd.Series], assume_timezone: Optional[str] = None) -> List[Dict[str, Any]]:
     """Convert a pandas Series into a lightweight-charts line payload."""
     payload: List[Dict[str, Any]] = []
@@ -330,6 +366,29 @@ def _series_to_lightweight(series: Optional[pd.Series], assume_timezone: Optiona
         if epoch_time is not None and scalar is not None:
             payload.append({'time': epoch_time, 'value': scalar})
     return payload
+def _series_to_echarts(series: Optional[pd.Series], assume_timezone: Optional[str] = None) -> List[List[Any]]:
+    """Convert a pandas Series into ECharts time-value pairs using ISO timestamps.
+
+    ``None`` values are preserved so ECharts can render gaps instead of
+    stretching lines across missing data.
+    """
+    data: List[List[Any]] = []
+    if series is None:
+        return data
+    numeric = pd.to_numeric(series, errors='coerce')
+    numeric = numeric.sort_index()
+    for idx, value in numeric.items():
+        iso_time = _timestamp_to_iso8601(idx, assume_timezone)
+        scalar = _to_float(value)
+        if iso_time is not None:
+            data.append([iso_time, scalar])
+    return data
+
+
+def _slugify_label(label: str) -> str:
+    cleaned = ''.join(ch.lower() if ch.isalnum() else '-' for ch in str(label))
+    parts = [segment for segment in cleaned.split('-') if segment]
+    return '-'.join(parts) or 'series'
 
 #transform helpers for lightweight-charts
 COLOR_PALETTE: List[str] = [
@@ -342,7 +401,7 @@ SUPER_TREND_COLORS: Dict[str, str] = {
 }
 VWAP_COLOR = '#000000'
 
-
+#transform helpers for lightweight-charts
 def _hash_string(value: str) -> int:
     hash_val = 0
     if not value:
@@ -355,14 +414,14 @@ def _hash_string(value: str) -> int:
         hash_val -= 0x100000000
     return hash_val
 
-
+#transform helpers for lightweight-charts
 def _color_for_series(name: str) -> str:
     if not COLOR_PALETTE:
         return '#1d4ed8'
     idx = abs(_hash_string(name)) % len(COLOR_PALETTE)
     return COLOR_PALETTE[idx]
 
-
+#transform helpers for lightweight-charts
 def build_lightweight_overlay_payload(overlays: Optional[Dict[str, Any]], assume_timezone: Optional[str] = None) -> Dict[str, Any]:
     """Serialize overlay indicators for consumption by lightweight-charts.
 
@@ -479,3 +538,229 @@ def build_lightweight_markers(trades_df: Optional[pd.DataFrame], assume_timezone
             })
 
     return markers
+
+
+def _reindex_series_to_interval(series: Optional[pd.Series], interval: Optional[pd.Timedelta]) -> Optional[pd.Series]:
+    """Return a series aligned to a fixed interval with NaNs for missing bars."""
+    if series is None or interval is None:
+        return series
+    if not isinstance(series.index, pd.DatetimeIndex) or series.empty:
+        return series
+    start = series.index.min()
+    end = series.index.max()
+    if pd.isna(start) or pd.isna(end):
+        return series
+    tz = series.index.tz
+    try:
+        new_index = pd.date_range(start=start, end=end, freq=interval, tz=tz)
+    except Exception:
+        return series
+    if len(new_index) > 500_000:
+        return series
+    return series.reindex(new_index)
+
+
+def build_echarts_indicator_payload(
+    indicator_bundle: Optional['IndicatorBundle'],
+    equity: Optional[Union[pd.Series, pd.DataFrame]],
+    drawdown: Optional[pd.Series],
+    returns: Optional[pd.Series],
+    *,
+    assume_timezone: Optional[str] = None,
+    analytics: Optional[List[Dict[str, Any]]] = None,
+    expected_interval: Optional[pd.Timedelta] = None
+) -> Dict[str, Any]:
+    """Serialize oscillator and performance data for Apache ECharts panels."""
+
+    payload: Dict[str, Any] = {
+        'oscillators': [],
+        'performance': {
+            'equity': {'series': [], 'legend': []},
+            'returns': {'series': [], 'legend': []},
+            'drawdown': {'series': [], 'legend': []}
+        },
+        'analytics': [],
+        'messages': list((indicator_bundle.messages if indicator_bundle else []) or []),
+        'meta': {
+            'timezone': assume_timezone
+        }
+    }
+
+    equity_series: Optional[pd.Series] = None
+    if isinstance(equity, pd.DataFrame):
+        if 'close' in equity.columns:
+            equity_series = pd.to_numeric(equity['close'], errors='coerce')
+        elif not equity.empty:
+            equity_series = pd.to_numeric(equity.iloc[:, 0], errors='coerce')
+    elif isinstance(equity, pd.Series):
+        equity_series = pd.to_numeric(equity, errors='coerce')
+
+    if equity_series is not None:
+        equity_data = _series_to_echarts(equity_series, assume_timezone)
+        if equity_data:
+            equity_color = '#2563eb'
+            payload['performance']['equity']['series'].append({
+                'type': 'line',
+                'name': 'Equity',
+                'data': equity_data,
+                'color': equity_color,
+                'area': True,
+                'smooth': True,
+                'showSymbol': False,
+                'symbol': 'none',
+                'lineStyle': {'width': 2, 'color': equity_color}
+            })
+            payload['performance']['equity']['legend'].append({'label': 'Equity', 'color': equity_color})
+            payload['performance']['equity']['grid'] = {'left': 52, 'right': 18, 'top': 28, 'bottom': 24}
+            payload['performance']['equity']['xAxis'] = {
+                'boundaryGap': False,
+                'axisLabel': {'color': '#94a3b8'},
+                'axisLine': {'lineStyle': {'color': '#e2e8f0'}},
+                'axisPointer': {'label': {'backgroundColor': '#1f2937'}}
+            }
+            payload['performance']['equity']['yAxis'] = {
+                'type': 'value',
+                'scale': True,
+                'axisLabel': {'color': '#64748b'},
+                'axisLine': {'lineStyle': {'color': '#e2e8f0'}},
+                'splitLine': {'lineStyle': {'color': '#e2e8f0'}},
+                'axisTick': {'show': False}
+            }
+            payload['performance']['equity']['legendConfig'] = {'top': 0, 'textStyle': {'color': '#475569', 'fontSize': 11}}
+            payload['performance']['equity']['backgroundColor'] = '#f4f6ff'
+
+    if isinstance(returns, pd.Series):
+        returns_series = pd.to_numeric(returns, errors='coerce')
+        returns_data = _series_to_echarts(returns_series, assume_timezone)
+        if returns_data:
+            payload['performance']['returns']['series'].append({
+                'type': 'bar',
+                'name': 'Return %',
+                'data': returns_data,
+                'positiveColor': '#16a34a',
+                'negativeColor': '#dc2626',
+                'barWidth': '60%',
+                'barMinWidth': 2
+            })
+            payload['performance']['returns']['legend'].append({'label': 'Return %', 'color': '#16a34a'})
+            payload['performance']['returns']['grid'] = {'left': 52, 'right': 18, 'top': 28, 'bottom': 24}
+            payload['performance']['returns']['xAxis'] = {
+                'boundaryGap': False,
+                'axisLabel': {'color': '#94a3b8'},
+                'axisLine': {'lineStyle': {'color': '#e2e8f0'}},
+                'axisPointer': {'label': {'backgroundColor': '#1f2937'}}
+            }
+            payload['performance']['returns']['yAxis'] = {
+                'type': 'value',
+                'scale': True,
+                'axisLabel': {'color': '#64748b'},
+                'axisLine': {'lineStyle': {'color': '#e2e8f0'}},
+                'splitLine': {'lineStyle': {'color': '#e2e8f0'}},
+                'axisTick': {'show': False}
+            }
+            payload['performance']['returns']['legendConfig'] = {'top': 0, 'textStyle': {'color': '#475569', 'fontSize': 11}}
+            payload['performance']['returns']['backgroundColor'] = '#f4f6ff'
+
+    if isinstance(drawdown, pd.Series):
+        drawdown_series = pd.to_numeric(drawdown, errors='coerce')
+        drawdown_data = _series_to_echarts(drawdown_series, assume_timezone)
+        if drawdown_data:
+            drawdown_color = '#7c3aed'
+            payload['performance']['drawdown']['series'].append({
+                'type': 'line',
+                'name': 'Drawdown',
+                'data': drawdown_data,
+                'color': drawdown_color,
+                'area': True,
+                'smooth': True,
+                'showSymbol': False,
+                'symbol': 'none',
+                'lineStyle': {'width': 2, 'color': drawdown_color}
+            })
+            payload['performance']['drawdown']['legend'].append({'label': 'Drawdown', 'color': drawdown_color})
+            payload['performance']['drawdown']['grid'] = {'left': 52, 'right': 18, 'top': 28, 'bottom': 24}
+            payload['performance']['drawdown']['xAxis'] = {
+                'boundaryGap': False,
+                'axisLabel': {'color': '#94a3b8'},
+                'axisLine': {'lineStyle': {'color': '#e2e8f0'}},
+                'axisPointer': {'label': {'backgroundColor': '#1f2937'}}
+            }
+            payload['performance']['drawdown']['yAxis'] = {
+                'type': 'value',
+                'scale': True,
+                'axisLabel': {'color': '#64748b'},
+                'axisLine': {'lineStyle': {'color': '#e2e8f0'}},
+                'splitLine': {'lineStyle': {'color': '#e2e8f0'}},
+                'axisTick': {'show': False}
+            }
+            payload['performance']['drawdown']['legendConfig'] = {'top': 0, 'textStyle': {'color': '#475569', 'fontSize': 11}}
+            payload['performance']['drawdown']['backgroundColor'] = '#f4f6ff'
+
+    if analytics:
+        analytics_panels: List[Dict[str, Any]] = []
+        for panel in analytics:
+            if not isinstance(panel, dict):
+                continue
+            title = str(panel.get('title') or 'Analytics')
+            series_map = panel.get('series') or {}
+            if not isinstance(series_map, dict):
+                continue
+            converted_series: List[Dict[str, Any]] = []
+            legend_entries: List[Dict[str, Any]] = []
+            for name, series_obj in series_map.items():
+                if not isinstance(series_obj, (pd.Series, pd.DataFrame)):
+                    continue
+                if isinstance(series_obj, pd.DataFrame):
+                    candidate = series_obj.iloc[:, 0] if not series_obj.empty else None
+                else:
+                    candidate = series_obj
+                padded = _reindex_series_to_interval(candidate, expected_interval)
+                data = _series_to_echarts(padded, assume_timezone) if padded is not None else []
+                if not data:
+                    continue
+                label = str(name)
+                color = panel.get('color_overrides', {}).get(label) if isinstance(panel.get('color_overrides'), dict) else None
+                if not color:
+                    color = _color_for_series(f"{title}-{label}")
+                converted_series.append({
+                    'type': 'line',
+                    'name': label,
+                    'data': data,
+                    'color': color,
+                    'area': bool(panel.get('area', False)),
+                    'smooth': True,
+                    'showSymbol': False,
+                    'symbol': 'none',
+                    'lineStyle': {'width': 2, 'color': color}
+                })
+                legend_entries.append({'label': label, 'color': color})
+            if not converted_series:
+                continue
+            analytics_panels.append({
+                'id': panel.get('id') or _slugify_label(title),
+                'title': title,
+                'series': converted_series,
+                'legend': legend_entries,
+                'height': panel.get('height'),
+                'kind': panel.get('kind') or 'analytics',
+                'grid': panel.get('grid') or {'left': 52, 'right': 18, 'top': 28, 'bottom': 24},
+                'xAxis': panel.get('xAxis') or {
+                    'boundaryGap': False,
+                    'axisLabel': {'color': '#94a3b8'},
+                    'axisLine': {'lineStyle': {'color': '#e2e8f0'}},
+                    'axisPointer': {'label': {'backgroundColor': '#1f2937'}}
+                },
+                'yAxis': panel.get('yAxis') or {
+                    'type': 'value',
+                    'scale': True,
+                    'axisLabel': {'color': '#64748b'},
+                    'axisLine': {'lineStyle': {'color': '#e2e8f0'}},
+                    'splitLine': {'lineStyle': {'color': '#e2e8f0'}},
+                    'axisTick': {'show': False}
+                },
+                'legendConfig': panel.get('legendConfig') or {'top': 0, 'textStyle': {'color': '#475569', 'fontSize': 11}},
+                'backgroundColor': panel.get('backgroundColor') or '#f4f6ff'
+            })
+        payload['analytics'] = analytics_panels
+
+    return payload

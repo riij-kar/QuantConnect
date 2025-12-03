@@ -2,7 +2,7 @@ import os, glob, json, pandas as pd, numpy as np
 from copy import deepcopy
 from datetime import datetime
 from dash import Dash, dcc, html, Input, Output, State, dash_table, callback_context
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Set
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from utils.chart_utils import (
@@ -12,12 +12,17 @@ from utils.chart_utils import (
     get_chart_series,
     build_lightweight_price_payload,
     build_lightweight_overlay_payload,
-    build_lightweight_markers
+    build_lightweight_markers,
+    build_echarts_indicator_payload
 )
 try:
     from .tradingview import PriceVolumeChart
 except ImportError:
     from tradingview import PriceVolumeChart
+try:
+    from .echarts import EChartsPanel
+except ImportError:
+    from echarts import EChartsPanel
 from utils.visual_indicators import compute_visual_indicators, IndicatorBundle
 from utils.trade_mapper import (
     load_all_json,
@@ -53,8 +58,40 @@ INDICATOR_CHECKLIST_OPTIONS = [
     ("macd", "MACD"),
 ]
 
+INDICATOR_CONFIG_KEY_MAP = {
+    'moving-average': 'sma',
+    'exponential-moving-average': 'ema',
+    'bollinger-bands': 'bbands',
+    'supertrend': 'supertrend',
+    'vwap': 'vwap',
+    'atr': 'atr',
+    'rsi': 'rsi',
+    'macd': 'macd'
+}
+
+CHECKLIST_VALUE_ORDER = [value for value, _ in INDICATOR_CHECKLIST_OPTIONS]
+
 DEFAULT_SMA_PERIOD_OPTIONS = [5, 8, 9, 10, 12, 15, 21, 34, 55, 89, 144, 200]
 DEFAULT_EMA_PERIOD_OPTIONS = [5, 8, 9, 12, 21, 34, 55, 89, 144, 200]
+
+PLOTLY_PRIMARY = '#636efa'
+PLOTLY_SECONDARY = '#ef553b'
+PLOTLY_POSITIVE = '#2ca02c'
+PLOTLY_NEGATIVE = '#d62728'
+PLOTLY_COMPACT_CONFIG = {
+    'displayModeBar': True,
+    'displaylogo': False,
+    'responsive': True,
+    'modeBarButtonsToRemove': ['lasso2d', 'select2d']
+}
+PLOTLY_RSI_COLOR = '#d946ef'
+PLOTLY_MACD_LINE = '#0ea5e9'
+PLOTLY_MACD_SIGNAL = '#8b5cf6'
+PLOTLY_MACD_HIST_POS = '#16a34a'
+PLOTLY_MACD_HIST_NEG = '#dc2626'
+PLOTLY_ATR_COLOR = '#fb923c'
+PLOTLY_INDICATOR_BG = '#f6f8ff'
+PLOTLY_INDICATOR_GRID = 'rgba(148,163,184,0.28)'
 
 SIDEBAR_BASE_STYLE = {
     'flex': '0 0 320px',
@@ -113,6 +150,301 @@ def _build_indicator_legend(entries: List[Dict[str, Any]]) -> List[html.Div]:
         })
         chips.append(chip)
     return chips
+
+
+def _default_indicator_selection(config: Optional[Dict[str, Any]]) -> List[str]:
+    """Return checklist values enabled by the project indicator configuration."""
+    if not config:
+        return []
+    defaults: List[str] = []
+    for config_key, checklist_value in INDICATOR_CONFIG_KEY_MAP.items():
+        if config.get(config_key):
+            defaults.append(checklist_value)
+    return defaults
+
+
+def _ordered_indicator_values(values: Set[str]) -> List[str]:
+    """Return checklist selections in canonical display order."""
+    if not values:
+        return []
+    normalized = {str(v) for v in values}
+    ordered: List[str] = []
+    for candidate in CHECKLIST_VALUE_ORDER:
+        if candidate in normalized:
+            ordered.append(candidate)
+    return ordered
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_plotly_indicator_blocks(
+    indicator_bundle: Optional[IndicatorBundle],
+    expected_interval: Optional[pd.Timedelta] = None
+) -> List[html.Div]:
+    oscillators = (indicator_bundle.oscillators if indicator_bundle else {}) or {}
+    if not oscillators:
+        return []
+
+    container_style = {
+        'marginBottom': '18px',
+        'padding': '12px',
+        'background': '#ffffff',
+        'border': '1px solid #e2e8f0',
+        'borderRadius': '8px',
+        'boxShadow': '0 10px 25px -20px rgba(15, 23, 42, 0.35)'
+    }
+
+    def _normalize_timestamp(value: Any) -> Optional[pd.Timestamp]:
+        try:
+            ts = pd.Timestamp(value)
+        except Exception:
+            return None
+        if ts is pd.NaT:
+            return None
+        if ts.tzinfo is not None:
+            try:
+                ts = ts.tz_convert('UTC')
+            except Exception:
+                pass
+            try:
+                ts = ts.tz_localize(None)
+            except TypeError:
+                pass
+        return pd.Timestamp(ts)
+
+    def _collect_axis_values(series: Optional[pd.Series], target: Set[pd.Timestamp]) -> None:
+        if series is None:
+            return
+        for ts in getattr(series, 'index', []):
+            norm = _normalize_timestamp(ts)
+            if norm is not None:
+                target.add(norm)
+
+    valid_entries: List[tuple[str, Dict[str, Any]]] = []
+    axis_values: Set[pd.Timestamp] = set()
+
+    for label, spec in oscillators.items():
+        if not isinstance(spec, dict):
+            continue
+        panel_type = spec.get('type')
+        if panel_type == 'line':
+            series = spec.get('series') if isinstance(spec.get('series'), pd.Series) else None
+            if series is None:
+                continue
+            numeric = pd.to_numeric(series, errors='coerce')
+            if numeric.dropna().empty:
+                continue
+            spec = {**spec, 'series': numeric}
+            valid_entries.append((str(label), spec))
+            _collect_axis_values(numeric, axis_values)
+        elif panel_type == 'macd':
+            macd_ser = spec.get('macd') if isinstance(spec.get('macd'), pd.Series) else None
+            signal_ser = spec.get('signal') if isinstance(spec.get('signal'), pd.Series) else None
+            hist_ser = spec.get('hist') if isinstance(spec.get('hist'), pd.Series) else None
+            any_series = [s for s in (macd_ser, signal_ser, hist_ser) if s is not None]
+            if not any_series:
+                continue
+            numeric_map = {
+                key: pd.to_numeric(s, errors='coerce') if s is not None else None
+                for key, s in [('macd', macd_ser), ('signal', signal_ser), ('hist', hist_ser)]
+            }
+            if all(s is None or s.dropna().empty for s in numeric_map.values()):
+                continue
+            merged_spec = {**spec, **numeric_map}
+            valid_entries.append((str(label), merged_spec))
+            for series in numeric_map.values():
+                _collect_axis_values(series, axis_values)
+
+    if not valid_entries or not axis_values:
+        return []
+
+    axis_list = sorted(axis_values)
+    axis_lookup = {ts: idx for idx, ts in enumerate(axis_list)}
+
+    def _map_index(idx_like: Iterable[Any]) -> List[Optional[int]]:
+        mapped: List[Optional[int]] = []
+        for ts in idx_like:
+            norm = _normalize_timestamp(ts)
+            mapped.append(axis_lookup.get(norm))
+        return mapped
+
+    def _format_tick(ts: pd.Timestamp) -> str:
+        try:
+            if expected_interval is not None and expected_interval >= pd.Timedelta(days=1):
+                return ts.strftime('%b %d')
+            return ts.strftime('%b %d\n%H:%M')
+        except Exception:
+            return str(ts)
+
+    subplot_titles = [label for label, _ in valid_entries]
+    row_count = len(valid_entries)
+    fig = make_subplots(
+        rows=row_count,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.04,
+        subplot_titles=tuple(subplot_titles)
+    )
+
+    rsi_rows: Set[int] = set()
+
+    for row_idx, (label, spec) in enumerate(valid_entries, start=1):
+        panel_type = spec.get('type')
+        upper_label = label.upper()
+        if panel_type == 'line':
+            series = spec.get('series')
+            assert isinstance(series, pd.Series)
+            x_positions = _map_index(series.index)
+            y_values = [None if pd.isna(val) else float(val) for val in series]
+            trace_cls = go.Scattergl if len(series) > 3000 else go.Scatter
+            line_color = PLOTLY_PRIMARY
+            if 'RSI' in upper_label:
+                line_color = PLOTLY_RSI_COLOR
+                rsi_rows.add(row_idx)
+            elif 'ATR' in upper_label:
+                line_color = PLOTLY_ATR_COLOR
+            trace = trace_cls(
+                x=x_positions,
+                y=y_values,
+                mode='lines',
+                name=label,
+                line=dict(color=line_color, width=2.0),
+                connectgaps=False,
+                hovertemplate='%{y:.2f}<extra></extra>'
+            )
+            fig.add_trace(trace, row=row_idx, col=1)
+            for level_label, level_value in spec.get('levels', []) or []:
+                numeric_level = _safe_float(level_value)
+                if numeric_level is None:
+                    continue
+                level_trace = go.Scatter(
+                    x=x_positions,
+                    y=[numeric_level] * len(x_positions),
+                    mode='lines',
+                    name=f"{label} {level_label}",
+                    line=dict(color='#94a3b8', width=1.1, dash='dash'),
+                    hoverinfo='skip'
+                )
+                level_trace.showlegend = False
+                fig.add_trace(level_trace, row=row_idx, col=1)
+        elif panel_type == 'macd':
+            hist_series = spec.get('hist') if isinstance(spec.get('hist'), pd.Series) else None
+            macd_series = spec.get('macd') if isinstance(spec.get('macd'), pd.Series) else None
+            signal_series = spec.get('signal') if isinstance(spec.get('signal'), pd.Series) else None
+            if hist_series is not None and not hist_series.dropna().empty:
+                x_hist = _map_index(hist_series.index)
+                y_hist = [None if pd.isna(val) else float(val) for val in hist_series]
+                hist_colors = [
+                    'rgba(0,0,0,0)' if val is None else (PLOTLY_MACD_HIST_POS if val >= 0 else PLOTLY_MACD_HIST_NEG)
+                    for val in y_hist
+                ]
+                hist_trace = go.Bar(
+                    x=x_hist,
+                    y=y_hist,
+                    marker=dict(color=hist_colors, line=dict(width=0)),
+                    opacity=0.65,
+                    name=f'{label} Hist'
+                )
+                hist_trace.showlegend = False
+                fig.add_trace(hist_trace, row=row_idx, col=1)
+            if macd_series is not None and not macd_series.dropna().empty:
+                x_macd = _map_index(macd_series.index)
+                y_macd = [None if pd.isna(val) else float(val) for val in macd_series]
+                macd_trace = go.Scatter(
+                    x=x_macd,
+                    y=y_macd,
+                    mode='lines',
+                    name=f'{label} MACD',
+                    line=dict(color=PLOTLY_MACD_LINE, width=2.0),
+                    connectgaps=False
+                )
+                fig.add_trace(macd_trace, row=row_idx, col=1)
+            if signal_series is not None and not signal_series.dropna().empty:
+                x_signal = _map_index(signal_series.index)
+                y_signal = [None if pd.isna(val) else float(val) for val in signal_series]
+                signal_trace = go.Scatter(
+                    x=x_signal,
+                    y=y_signal,
+                    mode='lines',
+                    name=f'{label} Signal',
+                    line=dict(color=PLOTLY_MACD_SIGNAL, width=1.6, dash='dash'),
+                    connectgaps=False
+                )
+                fig.add_trace(signal_trace, row=row_idx, col=1)
+
+    total_points = len(axis_list)
+    if total_points == 0:
+        return []
+
+    max_ticks = 12
+    step = max(1, total_points // max_ticks)
+    tick_positions = list(range(0, total_points, step))
+    if (total_points - 1) not in tick_positions:
+        tick_positions.append(total_points - 1)
+    tick_text = [_format_tick(axis_list[idx]) for idx in tick_positions]
+    spike_style = dict(
+        showspikes=True,
+        spikemode='across+toaxis+marker',
+        spikesnap='cursor',
+        spikecolor='rgba(0,0,0,0.35)',
+        spikedash='dot',
+        spikethickness=1
+    )
+
+    base_axis_kwargs = dict(
+        type='linear',
+        range=[-0.5, total_points - 0.5],
+        tickmode='array',
+        tickvals=tick_positions,
+        ticktext=tick_text,
+        automargin=True,
+        **spike_style
+    )
+
+    for row_idx in range(1, row_count + 1):
+        fig.update_xaxes(row=row_idx, col=1, **base_axis_kwargs)
+        show_ticks = (row_idx == row_count)
+        fig.update_xaxes(
+            row=row_idx,
+            col=1,
+            showticklabels=show_ticks,
+            ticklabelposition='outside bottom' if show_ticks else 'outside top',
+            ticks='outside',
+            ticklen=4,
+            tickfont=dict(size=10, color='#475569'),
+            showline=True,
+            linecolor='#cbd5f5',
+            rangeslider=dict(visible=False)
+        )
+        fig.update_yaxes(
+            row=row_idx,
+            col=1,
+            showgrid=True,
+            gridcolor=PLOTLY_INDICATOR_GRID,
+            zeroline=False,
+            tickfont=dict(color='#475569'),
+            linecolor='#cbd5f5'
+        )
+
+    for row_idx in rsi_rows:
+        fig.update_yaxes(row=row_idx, col=1, range=[0, 100])
+
+    fig.update_layout(
+        height=max(360, 260 * row_count),
+        hovermode='x unified',
+        legend=dict(orientation='h', yanchor='bottom', y=1.03, x=0, font=dict(size=10)),
+        margin=dict(l=60, r=40, t=60, b=60),
+        paper_bgcolor='#ffffff',
+        plot_bgcolor='#ffffff',
+        title=None
+    )
+
+    return [html.Div(dcc.Graph(figure=fig, config=PLOTLY_COMPACT_CONFIG), style=container_style)]
 
 app = Dash(__name__, suppress_callback_exceptions=True)
 app.title = "QC Local Dashboard"
@@ -1327,7 +1659,15 @@ def get_main_layout():
                 ),
                 type='default'
             ),
-            html.Div(id='extra-charts', style={'padding':'0 10px', 'marginTop':'12px'})
+            html.Div([
+                html.Div('Plotly Oscillators (RSI / MACD / ATR)', style={'fontWeight': '600', 'fontSize': '15px', 'color': '#1f2937', 'marginBottom': '6px'}),
+                html.Div(id='extra-charts', style={'marginTop': '8px'})
+            ], style={'marginTop': '18px'}),
+            EChartsPanel(
+                id='indicator-echarts-panel',
+                config={'oscillators': [], 'performance': {}, 'analytics': []},
+                style={'marginTop': '18px'}
+            )
         ], id='chart-fullscreen-container', style={'padding':'0 10px'}),
         html.H4('Trades', style={'margin':'10px'}),
         html.Div(id='trades-table', style={'padding':'0 10px 10px 10px'}),
@@ -1343,7 +1683,8 @@ app.layout = html.Div([
     dcc.Location(id='url'),
     html.Div(id='page-content'),
     dcc.Store(id='entry-exit-visible'),
-    PriceVolumeChart.script_tag()
+    PriceVolumeChart.script_tag(),
+    EChartsPanel.script_tag()
 ], id='root-container', className='dashboard-root-container')
 
 # Simple router: '/' -> main dashboard, '/upload' -> CSV upload page.
@@ -1373,11 +1714,14 @@ def update_backtests(project_path):
     Output('tradingview-price-volume', 'data-overlays'),
     Output('tradingview-price-volume', 'data-markers'),
     Output('indicator-legend', 'children'),
+    Output('indicator-echarts-panel', 'data-config'),
+    Output('indicator-echarts-panel', 'data-last-render'),
     Output('tradingview-price-volume', 'data-last-render'),
     Output('stats-panel','children'),
     Output('trades-table','children'),
     Output('trade-orders-table','children'),
     Output('extra-charts','children'),
+    Output('indicator-checklist','value'),
     Output('orders-table','children'),
     Input('backtest-dd','value'),
     Input('resample-btn','n_clicks'),
@@ -1408,7 +1752,24 @@ def update_visual(backtest_folder, _resample_clicks, entry_exit_visible, resampl
     empty_overlays_json = json.dumps({'lines': {}, 'supertrend': {}, 'legend': []})
     if not backtest_folder:
         empty_json = json.dumps([])
-        return empty_payload, empty_json, empty_json, empty_overlays_json, empty_json, [], '', '', '', '', [], ''
+        empty_config = json.dumps({'oscillators': [], 'performance': {}, 'analytics': []})
+        return (
+            empty_payload,
+            empty_json,
+            empty_json,
+            empty_overlays_json,
+            empty_json,
+            [],
+            empty_config,
+            '',
+            '',
+            '',
+            '',
+            '',
+            [],
+            [],
+            ''
+        )
     jsons = load_backtest_folder(backtest_folder)
     # aggregate charts
     charts = {}
@@ -1483,7 +1844,17 @@ def update_visual(backtest_folder, _resample_clicks, entry_exit_visible, resampl
     base_indicator_config = indicator_config or {}
     selected_indicator_config: Dict[str, Any] = {}
     user_indicator_messages: List[str] = []
-    selected_keys = set(indicator_selection or [])
+    selected_keys: Set[str] = {str(key) for key in (indicator_selection or []) if key is not None}
+    triggered_component = callback_context.triggered[0]['prop_id'].split('.')[0] if callback_context.triggered else None
+    should_apply_defaults = (
+        not selected_keys and (
+            triggered_component in (None, 'backtest-dd') or
+            (_resample_clicks or 0) == 0
+        )
+    )
+    if should_apply_defaults:
+        selected_keys.clear()
+    applied_indicator_values = _ordered_indicator_values(selected_keys)
 
     source_value = base_indicator_config.get('source')
     if source_value and selected_keys:
@@ -1590,36 +1961,46 @@ def update_visual(backtest_folder, _resample_clicks, entry_exit_visible, resampl
         orders_df = _convert_column_timezone(orders_df, 'lastEventTime', ui_timezone, naive_origin='UTC')
     trade_orders_df = build_trade_order_table(trades_df, orders_df)
 
-    toggle_value = entry_exit_visible if entry_exit_visible is not None else entry_exit_config_enabled
+    toggle_value = bool(entry_exit_visible) if entry_exit_visible is not None else False
     show_entry_exit = bool(entry_exit_config_enabled and toggle_value)
+
+    analytics_panels_input: List[Dict[str, Any]] = []
+    analytics_catalog = [
+        {'title': 'Portfolio Margin', 'alias': 'Portfolio Margin', 'area': False, 'height': 220},
+        {'title': 'Portfolio Turnover', 'alias': 'Portfolio Turnover', 'area': False, 'height': 220},
+        {'title': 'Exposure', 'alias': 'Exposure', 'area': True, 'height': 220},
+        {'title': 'Strategy Capacity', 'alias': 'Capacity', 'area': True, 'height': 220}
+    ]
+    for entry in analytics_catalog:
+        series = get_chart_series(series_map, entry['title'])
+        if not series:
+            series = get_chart_series(series_map, entry['alias'])
+        if not series:
+            continue
+        analytics_panels_input.append({
+            'title': entry['title'],
+            'series': series,
+            'area': entry.get('area', False),
+            'height': entry.get('height')
+        })
 
     candles, volume_payload = build_lightweight_price_payload(price_df, assume_timezone=ui_timezone)
     overlay_payload = build_lightweight_overlay_payload(indicator_bundle.overlays, assume_timezone=ui_timezone)
     markers = build_lightweight_markers(trades_for_markers if show_entry_exit else None, assume_timezone=ui_timezone)
     legend_children = _build_indicator_legend(overlay_payload.get('legend', []))
+    echarts_payload = build_echarts_indicator_payload(
+        indicator_bundle,
+        equity,
+        drawdown,
+        returns,
+        assume_timezone=ui_timezone,
+        analytics=analytics_panels_input,
+        expected_interval=expected_interval
+    )
+    echarts_payload['messages'] = indicator_messages
+    json_echarts = json.dumps(echarts_payload)
 
-    # Build additional charts to render below the main chart
-    extra_blocks = []
-    for title, prefix in [
-        ('Portfolio Margin', 'Portfolio Margin'),
-        ('Portfolio Turnover', 'Portfolio Turnover'),
-        ('Exposure', 'Exposure'),
-        ('Strategy Capacity', 'Capacity')
-    ]:
-        series = get_chart_series(series_map, title)
-        if not series:
-            # Try alternative label if different
-            series = get_chart_series(series_map, prefix)
-        if not series:
-            continue
-        # Build a small figure per block
-        mini = make_subplots(rows=1, cols=1, shared_xaxes=True)
-        for name, s in series.items():
-            mini.add_trace(go.Scatter(x=s.index, y=s.values, mode='lines', name=name))
-        mini.update_layout(height=250, margin=dict(l=40,r=10,t=30,b=30), legend_orientation='h', showlegend=True,
-                           title=title)
-        # Append this mini figure to the extra blocks
-        extra_blocks.append(dcc.Graph(figure=mini))
+    extra_blocks: List[Any] = _build_plotly_indicator_blocks(indicator_bundle, expected_interval=expected_interval)
 
     # stats summarization (combine multiple stat sources)
     stats = {}
@@ -1682,6 +2063,7 @@ def update_visual(backtest_folder, _resample_clicks, entry_exit_visible, resampl
         }
     }
     render_token = datetime.utcnow().isoformat() + 'Z'
+    echarts_render_token = render_token + '-ech'
     json_candles = json.dumps(candles)
     json_volume = json.dumps(volume_payload)
     json_overlays = json.dumps(overlay_payload)
@@ -1732,11 +2114,14 @@ def update_visual(backtest_folder, _resample_clicks, entry_exit_visible, resampl
         json_overlays,
         json_markers,
         legend_children,
+        json_echarts,
+        echarts_render_token,
         render_token,
         stats_component,
         trade_table,
         trade_orders_table,
         extra_blocks,
+        applied_indicator_values,
         order_table
     )
 
@@ -1759,11 +2144,11 @@ def sync_entry_exit_toggle(n_clicks, backtest_folder, current_visible):
     if not config_enabled:
         return None, 'Entry/Exit Signals (Disabled)', True
     if triggered == 'backtest-dd':
-        visible = True
+        visible = False
     elif triggered == 'toggle-entry-exit':
         visible = not bool(current_visible) if current_visible is not None else True
     else:
-        visible = bool(current_visible) if current_visible is not None else True
+        visible = bool(current_visible) if current_visible is not None else False
     label = 'Entry/Exit Signals: On' if visible else 'Entry/Exit Signals: Off'
     return visible, label, False
 
