@@ -8,6 +8,8 @@
         lower: '#22c55e'
     };
     var VWAP_COLOR = '#000000';
+    var WHEEL_ZOOM_IN_FACTOR = 0.82;
+    var WHEEL_ZOOM_OUT_FACTOR = 1.18;
 
     var CONTROL_STYLE_ID = 'tv-lite-controls-styles';
 
@@ -158,6 +160,68 @@
         return toolbar;
     }
 
+    function configureWheelBehavior(container, instance, options) {
+        if (!container || !instance || !instance.chart || typeof instance.chart.applyOptions !== 'function') {
+            return;
+        }
+
+        var baseHandleScroll = options && typeof options.handleScroll === 'object' ? options.handleScroll : null;
+        var baseHandleScale = options && typeof options.handleScale === 'object' ? options.handleScale : null;
+
+        var nextHandleScroll = Object.assign({}, baseHandleScroll || {});
+        var nextHandleScale = Object.assign({}, baseHandleScale || {});
+        nextHandleScroll.mouseWheel = false;
+        nextHandleScale.mouseWheel = false;
+
+        instance.chart.applyOptions({
+            handleScroll: nextHandleScroll,
+            handleScale: nextHandleScale
+        });
+
+        function adjustZoom(factorMultiplier) {
+            if (!instance.chart || typeof instance.chart.timeScale !== 'function') {
+                return;
+            }
+            var scale = instance.chart.timeScale();
+            if (!scale || typeof scale.getVisibleLogicalRange !== 'function' || typeof scale.setVisibleLogicalRange !== 'function') {
+                return;
+            }
+            var range = scale.getVisibleLogicalRange();
+            if (!range || typeof range.from !== 'number' || typeof range.to !== 'number') {
+                return;
+            }
+            var length = range.to - range.from;
+            if (!isFinite(length) || length <= 0) {
+                return;
+            }
+            var midpoint = range.from + length / 2;
+            var nextLength = length * factorMultiplier;
+            if (!isFinite(nextLength) || nextLength <= 0) {
+                return;
+            }
+            var nextRange = { from: midpoint - nextLength / 2, to: midpoint + nextLength / 2 };
+            scale.setVisibleLogicalRange(nextRange);
+        }
+
+        var wheelHandler = function (event) {
+            if (!event) {
+                return;
+            }
+            if (event.ctrlKey || event.metaKey) {
+                event.preventDefault();
+                var delta = typeof event.deltaY === 'number' ? event.deltaY : 0;
+                if (delta === 0) {
+                    return;
+                }
+                var factor = delta > 0 ? WHEEL_ZOOM_OUT_FACTOR : WHEEL_ZOOM_IN_FACTOR;
+                adjustZoom(factor);
+            }
+        };
+
+        container.addEventListener('wheel', wheelHandler, { passive: false });
+        instance.__wheelHandler = wheelHandler;
+    }
+
     function colorFor(name) {
         if (!COLOR_PALETTE.length) {
             return '#1d4ed8';
@@ -288,6 +352,8 @@
             var options = props && props.chartOptions ? props.chartOptions : {};
             instance.chart = lightweight.createChart(container, options);
             instance.library = lightweight;
+            instance.__container = container;
+            configureWheelBehavior(container, instance, options);
             attachControls(container, instance);
 
             var candlesOptions = props && props.candlesOptions ? props.candlesOptions : {};
@@ -564,6 +630,9 @@
         if (instance.__resizeObserver && instance.__resizeObserver.disconnect) {
             instance.__resizeObserver.disconnect();
         }
+        if (instance.__container && instance.__wheelHandler) {
+            instance.__container.removeEventListener('wheel', instance.__wheelHandler);
+        }
         var chart = instance.chart;
         if (instance.overlayLines) {
             Object.keys(instance.overlayLines).forEach(function (name) {
@@ -587,6 +656,8 @@
             instance.__controlsToolbar.parentNode.removeChild(instance.__controlsToolbar);
         }
         instance.__controlsToolbar = null;
+        instance.__wheelHandler = null;
+        instance.__container = null;
     }
 
     global.TradingViewPriceVolume = {

@@ -89,7 +89,14 @@ class MeanReversionAlphaModel(AlphaModel):
         self.algorithm = algorithm
         self.symbol = symbol
         self.indicators = indicators
-        forward_minutes = int(config.get("timeframe_minutes", 5) or 5)
+
+        trade_settings_cfg = (config or {}).get("trade_settings", {}) if isinstance(config, dict) else {}
+        resolution_cfg = (config or {}).get("resolution", {}) if isinstance(config, dict) else {}
+        period_value = resolution_cfg.get("period", 5)
+        try:
+            forward_minutes = int(period_value or 5)
+        except (TypeError, ValueError):
+            forward_minutes = 5
         self.signal_horizon = timedelta(minutes=max(1, forward_minutes))
         self.trade_limit = None
         self.trades_today = 0
@@ -112,7 +119,7 @@ class MeanReversionAlphaModel(AlphaModel):
                     self.algorithm.Debug(
                         "MeanReversionAlphaModel: failed to apply dynamic candlestick filter to pattern manager."
                     )
-        limit_value = config.get("trade_limit") if isinstance(config, dict) else None
+        limit_value = trade_settings_cfg.get("trade_limit") or None
         try:
             if limit_value is not None:
                 limit_int = int(limit_value)
@@ -200,7 +207,7 @@ class MeanReversionAlphaModel(AlphaModel):
         ):
             if current_time - self.last_signal_time >= self.signal_horizon:
                 self.current_direction = InsightDirection.Flat
-
+        #chart pattern filter
         pattern_ok = True
         if self.pattern_manager:
             pattern_ok = self.pattern_manager.filter_passes()
@@ -272,12 +279,13 @@ class MeanReversionRiskManagementModel(RiskManagementModel):
         config : dict
             Configuration values that may override the default offsets.
         """
+        trade_settings_cfg = (config or {}).get("trade_settings", {}) if isinstance(config, dict) else {}
         self.algorithm = algorithm
         self.symbol = symbol
         if not isinstance(config, dict):
             return
-        stop_loss = config.get("stop_loss_offset", self.stop_loss_offset)
-        take_profit = config.get("take_profit_offset", self.take_profit_offset)
+        stop_loss = trade_settings_cfg.get("stop_loss_offset", self.stop_loss_offset)
+        take_profit = trade_settings_cfg.get("take_profit_offset", self.take_profit_offset)
         try:
             if stop_loss is None:
                 self.stop_loss_offset = None

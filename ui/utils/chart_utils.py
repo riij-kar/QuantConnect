@@ -21,6 +21,16 @@ __all__ = [
     'build_lightweight_markers',
     'build_echarts_indicator_payload'
 ]
+ 
+DARK_PANEL_BACKGROUND = '#0b1220'
+DARK_CANVAS_BACKGROUND = '#060816'
+DARK_GRID_COLOR = 'rgba(148,163,184,0.18)'
+DARK_AXIS_LINE_COLOR = '#1f2937'
+DARK_AXIS_LABEL_COLOR = '#cbd5f5'
+DARK_AXIS_LABEL_MUTED = '#94a3b8'
+DARK_LEGEND_TEXT = '#e2e8f0'
+DARK_TOOLTIP_BG = '#0f172a'
+DARK_TOOLTIP_BORDER = '#1f2937'
 
 def extract_series(charts_obj: dict):
     """Convert the LEAN ``charts`` payload into a dictionary of Series.
@@ -611,23 +621,32 @@ def build_echarts_indicator_payload(
                 'lineStyle': {'width': 2, 'color': equity_color}
             })
             payload['performance']['equity']['legend'].append({'label': 'Equity', 'color': equity_color})
-            payload['performance']['equity']['grid'] = {'left': 52, 'right': 18, 'top': 28, 'bottom': 24}
+            payload['performance']['equity']['grid'] = {
+                'left': 52,
+                'right': 22,
+                'top': 28,
+                'bottom': 24,
+                'backgroundColor': DARK_PANEL_BACKGROUND,
+                'borderColor': DARK_AXIS_LINE_COLOR
+            }
             payload['performance']['equity']['xAxis'] = {
                 'boundaryGap': False,
-                'axisLabel': {'color': '#94a3b8'},
-                'axisLine': {'lineStyle': {'color': '#e2e8f0'}},
-                'axisPointer': {'label': {'backgroundColor': '#1f2937'}}
+                'axisLabel': {'color': DARK_AXIS_LABEL_MUTED},
+                'axisLine': {'lineStyle': {'color': DARK_AXIS_LINE_COLOR}},
+                'axisPointer': {'label': {'backgroundColor': DARK_TOOLTIP_BG, 'color': DARK_AXIS_LABEL_COLOR}},
+                'splitLine': {'lineStyle': {'color': DARK_GRID_COLOR}}
             }
             payload['performance']['equity']['yAxis'] = {
                 'type': 'value',
                 'scale': True,
-                'axisLabel': {'color': '#64748b'},
-                'axisLine': {'lineStyle': {'color': '#e2e8f0'}},
-                'splitLine': {'lineStyle': {'color': '#e2e8f0'}},
-                'axisTick': {'show': False}
+                'axisLabel': {'color': DARK_AXIS_LABEL_MUTED},
+                'axisLine': {'lineStyle': {'color': DARK_AXIS_LINE_COLOR}},
+                'splitLine': {'lineStyle': {'color': DARK_GRID_COLOR}},
+                'axisTick': {'show': False},
+                'axisPointer': {'label': {'backgroundColor': DARK_TOOLTIP_BG, 'color': DARK_AXIS_LABEL_COLOR}}
             }
-            payload['performance']['equity']['legendConfig'] = {'top': 0, 'textStyle': {'color': '#475569', 'fontSize': 11}}
-            payload['performance']['equity']['backgroundColor'] = '#f4f6ff'
+            payload['performance']['equity']['legendConfig'] = {'top': 0, 'textStyle': {'color': DARK_LEGEND_TEXT, 'fontSize': 11}}
+            payload['performance']['equity']['backgroundColor'] = DARK_PANEL_BACKGROUND
 
     if isinstance(returns, pd.Series):
         returns_series = pd.to_numeric(returns, errors='coerce')
@@ -643,23 +662,32 @@ def build_echarts_indicator_payload(
                 'barMinWidth': 2
             })
             payload['performance']['returns']['legend'].append({'label': 'Return %', 'color': '#16a34a'})
-            payload['performance']['returns']['grid'] = {'left': 52, 'right': 18, 'top': 28, 'bottom': 24}
+            payload['performance']['returns']['grid'] = {
+                'left': 52,
+                'right': 22,
+                'top': 28,
+                'bottom': 24,
+                'backgroundColor': DARK_PANEL_BACKGROUND,
+                'borderColor': DARK_AXIS_LINE_COLOR
+            }
             payload['performance']['returns']['xAxis'] = {
                 'boundaryGap': False,
-                'axisLabel': {'color': '#94a3b8'},
-                'axisLine': {'lineStyle': {'color': '#e2e8f0'}},
-                'axisPointer': {'label': {'backgroundColor': '#1f2937'}}
+                'axisLabel': {'color': DARK_AXIS_LABEL_MUTED},
+                'axisLine': {'lineStyle': {'color': DARK_AXIS_LINE_COLOR}},
+                'axisPointer': {'label': {'backgroundColor': DARK_TOOLTIP_BG, 'color': DARK_AXIS_LABEL_COLOR}},
+                'splitLine': {'lineStyle': {'color': DARK_GRID_COLOR}}
             }
             payload['performance']['returns']['yAxis'] = {
                 'type': 'value',
                 'scale': True,
-                'axisLabel': {'color': '#64748b'},
-                'axisLine': {'lineStyle': {'color': '#e2e8f0'}},
-                'splitLine': {'lineStyle': {'color': '#e2e8f0'}},
-                'axisTick': {'show': False}
+                'axisLabel': {'color': DARK_AXIS_LABEL_MUTED},
+                'axisLine': {'lineStyle': {'color': DARK_AXIS_LINE_COLOR}},
+                'splitLine': {'lineStyle': {'color': DARK_GRID_COLOR}},
+                'axisTick': {'show': False},
+                'axisPointer': {'label': {'backgroundColor': DARK_TOOLTIP_BG, 'color': DARK_AXIS_LABEL_COLOR}}
             }
-            payload['performance']['returns']['legendConfig'] = {'top': 0, 'textStyle': {'color': '#475569', 'fontSize': 11}}
-            payload['performance']['returns']['backgroundColor'] = '#f4f6ff'
+            payload['performance']['returns']['legendConfig'] = {'top': 0, 'textStyle': {'color': DARK_LEGEND_TEXT, 'fontSize': 11}}
+            payload['performance']['returns']['backgroundColor'] = DARK_PANEL_BACKGROUND
 
     if isinstance(drawdown, pd.Series):
         drawdown_series = pd.to_numeric(drawdown, errors='coerce')
@@ -678,23 +706,32 @@ def build_echarts_indicator_payload(
                 'lineStyle': {'width': 2, 'color': drawdown_color}
             })
             payload['performance']['drawdown']['legend'].append({'label': 'Drawdown', 'color': drawdown_color})
-            payload['performance']['drawdown']['grid'] = {'left': 52, 'right': 18, 'top': 28, 'bottom': 24}
+            payload['performance']['drawdown']['grid'] = {
+                'left': 52,
+                'right': 22,
+                'top': 28,
+                'bottom': 24,
+                'backgroundColor': DARK_PANEL_BACKGROUND,
+                'borderColor': DARK_AXIS_LINE_COLOR
+            }
             payload['performance']['drawdown']['xAxis'] = {
                 'boundaryGap': False,
-                'axisLabel': {'color': '#94a3b8'},
-                'axisLine': {'lineStyle': {'color': '#e2e8f0'}},
-                'axisPointer': {'label': {'backgroundColor': '#1f2937'}}
+                'axisLabel': {'color': DARK_AXIS_LABEL_MUTED},
+                'axisLine': {'lineStyle': {'color': DARK_AXIS_LINE_COLOR}},
+                'axisPointer': {'label': {'backgroundColor': DARK_TOOLTIP_BG, 'color': DARK_AXIS_LABEL_COLOR}},
+                'splitLine': {'lineStyle': {'color': DARK_GRID_COLOR}}
             }
             payload['performance']['drawdown']['yAxis'] = {
                 'type': 'value',
                 'scale': True,
-                'axisLabel': {'color': '#64748b'},
-                'axisLine': {'lineStyle': {'color': '#e2e8f0'}},
-                'splitLine': {'lineStyle': {'color': '#e2e8f0'}},
-                'axisTick': {'show': False}
+                'axisLabel': {'color': DARK_AXIS_LABEL_MUTED},
+                'axisLine': {'lineStyle': {'color': DARK_AXIS_LINE_COLOR}},
+                'splitLine': {'lineStyle': {'color': DARK_GRID_COLOR}},
+                'axisTick': {'show': False},
+                'axisPointer': {'label': {'backgroundColor': DARK_TOOLTIP_BG, 'color': DARK_AXIS_LABEL_COLOR}}
             }
-            payload['performance']['drawdown']['legendConfig'] = {'top': 0, 'textStyle': {'color': '#475569', 'fontSize': 11}}
-            payload['performance']['drawdown']['backgroundColor'] = '#f4f6ff'
+            payload['performance']['drawdown']['legendConfig'] = {'top': 0, 'textStyle': {'color': DARK_LEGEND_TEXT, 'fontSize': 11}}
+            payload['performance']['drawdown']['backgroundColor'] = DARK_PANEL_BACKGROUND
 
     if analytics:
         analytics_panels: List[Dict[str, Any]] = []
@@ -743,23 +780,32 @@ def build_echarts_indicator_payload(
                 'legend': legend_entries,
                 'height': panel.get('height'),
                 'kind': panel.get('kind') or 'analytics',
-                'grid': panel.get('grid') or {'left': 52, 'right': 18, 'top': 28, 'bottom': 24},
+                'grid': panel.get('grid') or {
+                    'left': 52,
+                    'right': 22,
+                    'top': 28,
+                    'bottom': 24,
+                    'backgroundColor': DARK_PANEL_BACKGROUND,
+                    'borderColor': DARK_AXIS_LINE_COLOR
+                },
                 'xAxis': panel.get('xAxis') or {
                     'boundaryGap': False,
-                    'axisLabel': {'color': '#94a3b8'},
-                    'axisLine': {'lineStyle': {'color': '#e2e8f0'}},
-                    'axisPointer': {'label': {'backgroundColor': '#1f2937'}}
+                    'axisLabel': {'color': DARK_AXIS_LABEL_MUTED},
+                    'axisLine': {'lineStyle': {'color': DARK_AXIS_LINE_COLOR}},
+                    'axisPointer': {'label': {'backgroundColor': DARK_TOOLTIP_BG, 'color': DARK_AXIS_LABEL_COLOR}},
+                    'splitLine': {'lineStyle': {'color': DARK_GRID_COLOR}}
                 },
                 'yAxis': panel.get('yAxis') or {
                     'type': 'value',
                     'scale': True,
-                    'axisLabel': {'color': '#64748b'},
-                    'axisLine': {'lineStyle': {'color': '#e2e8f0'}},
-                    'splitLine': {'lineStyle': {'color': '#e2e8f0'}},
-                    'axisTick': {'show': False}
+                    'axisLabel': {'color': DARK_AXIS_LABEL_MUTED},
+                    'axisLine': {'lineStyle': {'color': DARK_AXIS_LINE_COLOR}},
+                    'splitLine': {'lineStyle': {'color': DARK_GRID_COLOR}},
+                    'axisTick': {'show': False},
+                    'axisPointer': {'label': {'backgroundColor': DARK_TOOLTIP_BG, 'color': DARK_AXIS_LABEL_COLOR}}
                 },
-                'legendConfig': panel.get('legendConfig') or {'top': 0, 'textStyle': {'color': '#475569', 'fontSize': 11}},
-                'backgroundColor': panel.get('backgroundColor') or '#f4f6ff'
+                'legendConfig': panel.get('legendConfig') or {'top': 0, 'textStyle': {'color': DARK_LEGEND_TEXT, 'fontSize': 11}},
+                'backgroundColor': panel.get('backgroundColor') or DARK_PANEL_BACKGROUND
             })
         payload['analytics'] = analytics_panels
 

@@ -85,13 +85,26 @@ PLOTLY_COMPACT_CONFIG = {
     'modeBarButtonsToRemove': ['lasso2d', 'select2d']
 }
 PLOTLY_RSI_COLOR = '#d946ef'
+PLOTLY_RSI_SMA_COLOR = '#f97316'
 PLOTLY_MACD_LINE = '#0ea5e9'
 PLOTLY_MACD_SIGNAL = '#8b5cf6'
 PLOTLY_MACD_HIST_POS = '#16a34a'
 PLOTLY_MACD_HIST_NEG = '#dc2626'
 PLOTLY_ATR_COLOR = '#fb923c'
-PLOTLY_INDICATOR_BG = '#f6f8ff'
+PLOTLY_INDICATOR_BG = '#060816'
 PLOTLY_INDICATOR_GRID = 'rgba(148,163,184,0.28)'
+PLOTLY_AXIS_LINE = '#1f2937'
+PLOTLY_TICK_COLOR = '#cbd5f5'
+PLOTLY_SPIKE_COLOR = 'rgba(226,232,240,0.45)'
+RSI_LEVEL_TEXT_COLORS = {
+    'OVERBOUGHT': '#f97316',
+    'MIDDLE': '#fbbf24',
+    'OVERSOLD': '#22d3ee'
+}
+RSI_ZONE_FILL = {
+    'overbought': 'rgba(249,115,22,0.08)',
+    'oversold': 'rgba(34,197,94,0.12)'
+}
 
 SIDEBAR_BASE_STYLE = {
     'flex': '0 0 320px',
@@ -141,7 +154,7 @@ def _build_indicator_legend(entries: List[Dict[str, Any]]) -> List[html.Div]:
                 'backgroundColor': color,
                 'marginRight': '6px'
             }),
-            html.Span(label, style={'fontSize': '12px', 'color': '#333'})
+            html.Span(label, style={'fontSize': '12px', 'color': '#e2e8f0'})
         ], style={
             'display': 'flex',
             'alignItems': 'center',
@@ -193,10 +206,10 @@ def _build_plotly_indicator_blocks(
     container_style = {
         'marginBottom': '18px',
         'padding': '12px',
-        'background': '#ffffff',
-        'border': '1px solid #e2e8f0',
+        'background': '#0b1220',
+        'border': '1px solid #1f2937',
         'borderRadius': '8px',
-        'boxShadow': '0 10px 25px -20px rgba(15, 23, 42, 0.35)'
+        'boxShadow': '0 10px 25px -18px rgba(15, 23, 42, 0.65)'
     }
 
     def _normalize_timestamp(value: Any) -> Optional[pd.Timestamp]:
@@ -239,7 +252,20 @@ def _build_plotly_indicator_blocks(
             numeric = pd.to_numeric(series, errors='coerce')
             if numeric.dropna().empty:
                 continue
+            smoothing_struct = None
+            smoothing_spec = spec.get('smoothing') if isinstance(spec.get('smoothing'), dict) else None
+            if smoothing_spec:
+                smoothing_series = smoothing_spec.get('series') if isinstance(smoothing_spec.get('series'), pd.Series) else None
+                if smoothing_series is not None:
+                    smoothing_numeric = pd.to_numeric(smoothing_series, errors='coerce')
+                    if not smoothing_numeric.dropna().empty:
+                        smoothing_struct = {**smoothing_spec, 'series': smoothing_numeric}
+                        _collect_axis_values(smoothing_numeric, axis_values)
             spec = {**spec, 'series': numeric}
+            if smoothing_struct is not None:
+                spec['smoothing'] = smoothing_struct
+            elif 'smoothing' in spec:
+                spec.pop('smoothing', None)
             valid_entries.append((str(label), spec))
             _collect_axis_values(numeric, axis_values)
         elif panel_type == 'macd':
@@ -281,6 +307,9 @@ def _build_plotly_indicator_blocks(
         except Exception:
             return str(ts)
 
+    def _yref(row_index: int) -> str:
+        return 'y' if row_index == 1 else f'y{row_index}'
+
     subplot_titles = [label for label, _ in valid_entries]
     row_count = len(valid_entries)
     fig = make_subplots(
@@ -292,6 +321,8 @@ def _build_plotly_indicator_blocks(
     )
 
     rsi_rows: Set[int] = set()
+    rsi_zone_map: Dict[int, Dict[str, Optional[float]]] = {}
+    level_annotation_queue: List[Tuple[int, str, float]] = []
 
     for row_idx, (label, spec) in enumerate(valid_entries, start=1):
         panel_type = spec.get('type')
@@ -303,9 +334,38 @@ def _build_plotly_indicator_blocks(
             y_values = [None if pd.isna(val) else float(val) for val in series]
             trace_cls = go.Scattergl if len(series) > 3000 else go.Scatter
             line_color = PLOTLY_PRIMARY
+            smoothing_spec = spec.get('smoothing') if isinstance(spec.get('smoothing'), dict) else None
+            custom_data = None
+            hover_template = '%{y:.2f}<extra></extra>'
             if 'RSI' in upper_label:
                 line_color = PLOTLY_RSI_COLOR
                 rsi_rows.add(row_idx)
+                zone_data = {
+                    'overbought': _safe_float(spec.get('overbought')),
+                    'oversold': _safe_float(spec.get('oversold')),
+                    'middle': _safe_float(spec.get('middle'))
+                }
+                rsi_zone_map[row_idx] = zone_data
+                overbought_val = zone_data.get('overbought')
+                oversold_val = zone_data.get('oversold')
+                middle_val = zone_data.get('middle')
+
+                def _zone_label(value: float) -> str:
+                    if overbought_val is not None and not pd.isna(overbought_val) and value >= overbought_val:
+                        return f"Overbought >= {overbought_val:.0f}"
+                    if oversold_val is not None and not pd.isna(oversold_val) and value <= oversold_val:
+                        return f"Oversold <= {oversold_val:.0f}"
+                    if middle_val is not None and not pd.isna(middle_val):
+                        return "Above Middle" if value >= middle_val else "Below Middle"
+                    return "Neutral"
+
+                custom_data = []
+                for val in series:
+                    if pd.isna(val):
+                        custom_data.append('')
+                    else:
+                        custom_data.append(_zone_label(float(val)))
+                hover_template = '%{y:.2f} | %{customdata}<extra></extra>'
             elif 'ATR' in upper_label:
                 line_color = PLOTLY_ATR_COLOR
             trace = trace_cls(
@@ -315,23 +375,44 @@ def _build_plotly_indicator_blocks(
                 name=label,
                 line=dict(color=line_color, width=2.0),
                 connectgaps=False,
-                hovertemplate='%{y:.2f}<extra></extra>'
+                hovertemplate=hover_template,
+                customdata=custom_data
             )
             fig.add_trace(trace, row=row_idx, col=1)
+            if smoothing_spec:
+                smoothing_series = smoothing_spec.get('series') if isinstance(smoothing_spec.get('series'), pd.Series) else None
+                if smoothing_series is not None and not smoothing_series.dropna().empty:
+                    x_smooth = _map_index(smoothing_series.index)
+                    y_smooth = [None if pd.isna(val) else float(val) for val in smoothing_series]
+                    ma_name = smoothing_spec.get('label') or f"{label} MA"
+                    smooth_trace = trace_cls(
+                        x=x_smooth,
+                        y=y_smooth,
+                        mode='lines',
+                        name=ma_name,
+                        line=dict(color=PLOTLY_RSI_SMA_COLOR, width=1.8),
+                        connectgaps=False,
+                        hovertemplate='%{y:.2f}<extra></extra>'
+                    )
+                    fig.add_trace(smooth_trace, row=row_idx, col=1)
             for level_label, level_value in spec.get('levels', []) or []:
                 numeric_level = _safe_float(level_value)
-                if numeric_level is None:
+                if numeric_level is None or pd.isna(numeric_level):
                     continue
+                level_key = str(level_label).upper()
+                level_color = RSI_LEVEL_TEXT_COLORS.get(level_key, '#94a3b8')
+                level_dash = 'dot' if level_key == 'MIDDLE' else 'dash'
                 level_trace = go.Scatter(
                     x=x_positions,
                     y=[numeric_level] * len(x_positions),
                     mode='lines',
                     name=f"{label} {level_label}",
-                    line=dict(color='#94a3b8', width=1.1, dash='dash'),
+                    line=dict(color=level_color, width=1.1, dash=level_dash),
                     hoverinfo='skip'
                 )
                 level_trace.showlegend = False
                 fig.add_trace(level_trace, row=row_idx, col=1)
+                level_annotation_queue.append((row_idx, str(level_label), numeric_level))
         elif panel_type == 'macd':
             hist_series = spec.get('hist') if isinstance(spec.get('hist'), pd.Series) else None
             macd_series = spec.get('macd') if isinstance(spec.get('macd'), pd.Series) else None
@@ -391,7 +472,7 @@ def _build_plotly_indicator_blocks(
         showspikes=True,
         spikemode='across+toaxis+marker',
         spikesnap='cursor',
-        spikecolor='rgba(0,0,0,0.35)',
+        spikecolor=PLOTLY_SPIKE_COLOR,
         spikedash='dot',
         spikethickness=1
     )
@@ -416,9 +497,9 @@ def _build_plotly_indicator_blocks(
             ticklabelposition='outside bottom' if show_ticks else 'outside top',
             ticks='outside',
             ticklen=4,
-            tickfont=dict(size=10, color='#475569'),
+            tickfont=dict(size=10, color=PLOTLY_TICK_COLOR),
             showline=True,
-            linecolor='#cbd5f5',
+            linecolor=PLOTLY_AXIS_LINE,
             rangeslider=dict(visible=False)
         )
         fig.update_yaxes(
@@ -427,22 +508,120 @@ def _build_plotly_indicator_blocks(
             showgrid=True,
             gridcolor=PLOTLY_INDICATOR_GRID,
             zeroline=False,
-            tickfont=dict(color='#475569'),
-            linecolor='#cbd5f5'
+            tickfont=dict(color=PLOTLY_TICK_COLOR),
+            linecolor=PLOTLY_AXIS_LINE
         )
 
     for row_idx in rsi_rows:
         fig.update_yaxes(row=row_idx, col=1, range=[0, 100])
 
+    iso_meta: List[str] = []
+    epoch_meta: List[int] = []
+    for ts in axis_list:
+        if hasattr(ts, 'isoformat'):
+            try:
+                iso_meta.append(ts.isoformat())
+            except Exception:
+                iso_meta.append(str(ts))
+        else:
+            iso_meta.append(str(ts))
+        try:
+            epoch_meta.append(int(pd.Timestamp(ts).value // 1_000_000))
+        except Exception:
+            epoch_meta.append(0)
+
     fig.update_layout(
         height=max(360, 260 * row_count),
         hovermode='x unified',
-        legend=dict(orientation='h', yanchor='bottom', y=1.03, x=0, font=dict(size=10)),
-        margin=dict(l=60, r=40, t=60, b=60),
-        paper_bgcolor='#ffffff',
-        plot_bgcolor='#ffffff',
-        title=None
+        legend=dict(orientation='h', yanchor='bottom', y=1.03, x=0, font=dict(size=10, color=PLOTLY_TICK_COLOR)),
+        margin=dict(l=60, r=130, t=60, b=60),
+        paper_bgcolor=PLOTLY_INDICATOR_BG,
+        plot_bgcolor=PLOTLY_INDICATOR_BG,
+        font=dict(color=PLOTLY_TICK_COLOR),
+        hoverlabel=dict(bgcolor='#172033', font=dict(color='#f8fafc')),
+        title=None,
+        meta={'axisTimestamps': iso_meta, 'axisEpochMillis': epoch_meta}
     )
+
+    for row_idx in sorted(rsi_rows):
+        yaxis_layout_key = 'yaxis' if row_idx == 1 else f'yaxis{row_idx}'
+        axis_obj = getattr(fig.layout, yaxis_layout_key, None)
+        domain = getattr(axis_obj, 'domain', None) if axis_obj is not None else None
+        if not domain:
+            continue
+        fig.add_shape(
+            type='rect',
+            xref='paper',
+            yref='paper',
+            x0=0,
+            x1=1,
+            y0=domain[0],
+            y1=domain[1],
+            fillcolor='rgba(6,8,22,0.9)',
+            line=dict(width=0),
+            layer='below'
+        )
+        zone_info = rsi_zone_map.get(row_idx, {})
+        oversold_val = zone_info.get('oversold')
+        overbought_val = zone_info.get('overbought')
+        if oversold_val is not None and not pd.isna(oversold_val):
+            oversold_clamped = max(0.0, min(float(oversold_val), 100.0))
+            if oversold_clamped > 0:
+                fig.add_shape(
+                    type='rect',
+                    xref='paper',
+                    yref=_yref(row_idx),
+                    x0=0,
+                    x1=1,
+                    y0=0,
+                    y1=oversold_clamped,
+                    fillcolor=RSI_ZONE_FILL['oversold'],
+                    line=dict(width=0),
+                    layer='below'
+                )
+        if overbought_val is not None and not pd.isna(overbought_val):
+            overbought_clamped = max(0.0, min(float(overbought_val), 100.0))
+            if overbought_clamped < 100:
+                fig.add_shape(
+                    type='rect',
+                    xref='paper',
+                    yref=_yref(row_idx),
+                    x0=0,
+                    x1=1,
+                    y0=overbought_clamped,
+                    y1=100,
+                    fillcolor=RSI_ZONE_FILL['overbought'],
+                    line=dict(width=0),
+                    layer='below'
+                )
+
+    seen_level_annotations: Set[Tuple[int, str]] = set()
+    for row_idx, level_label, level_value in level_annotation_queue:
+        if level_value is None or pd.isna(level_value):
+            continue
+        key = (row_idx, level_label)
+        if key in seen_level_annotations:
+            continue
+        seen_level_annotations.add(key)
+        level_key = str(level_label).upper()
+        text_color = RSI_LEVEL_TEXT_COLORS.get(level_key, PLOTLY_TICK_COLOR)
+        value_text = f"{level_value:.2f}".rstrip('0').rstrip('.')
+        fig.add_annotation(
+            x=1.02,
+            y=level_value,
+            xref='paper',
+            yref=_yref(row_idx),
+            text=f"{level_label} {value_text}",
+            showarrow=False,
+            font=dict(color=text_color, size=10),
+            align='left',
+            yanchor='middle',
+            bgcolor='rgba(15,23,42,0.78)',
+            bordercolor='rgba(148,163,184,0.6)',
+            borderwidth=0.7,
+            borderpad=4,
+            xanchor='left'
+        )
 
     return [html.Div(dcc.Graph(figure=fig, config=PLOTLY_COMPACT_CONFIG), style=container_style)]
 
@@ -1426,31 +1605,89 @@ def build_figure(price_df, indicator_bundle: Optional[IndicatorBundle], equity, 
     figure_height = max(900, 240 * total_rows + 120)
     fig.update_layout(
         height=figure_height,
-        title='Backtest Visualization',
-        legend_orientation='h',
+        title=dict(text='Backtest Visualization', font=dict(color=PLOTLY_TICK_COLOR, size=22)),
+        legend=dict(
+            orientation='h',
+            y=1.02,
+            x=0,
+            font=dict(size=11, color=PLOTLY_TICK_COLOR),
+            bgcolor='rgba(15,23,42,0.55)',
+            bordercolor='rgba(148,163,184,0.45)',
+            borderwidth=0.6
+        ),
         showlegend=True,
         xaxis_rangeslider_visible=False,
         hovermode='x unified',
         hoverdistance=30,
         spikedistance=-1,
-        margin=dict(t=90, l=60, r=40, b=90)
+        margin=dict(t=90, l=70, r=120, b=90),
+        paper_bgcolor=PLOTLY_INDICATOR_BG,
+        plot_bgcolor=PLOTLY_INDICATOR_BG,
+        font=dict(color=PLOTLY_TICK_COLOR),
+        hoverlabel=dict(bgcolor='#172033', font=dict(color='#f8fafc'))
     )
     spike_style = dict(
         showspikes=True,
         spikemode='across+toaxis+marker',
         spikesnap='cursor',
-        spikecolor='rgba(0,0,0,0.35)',
+        spikecolor=PLOTLY_SPIKE_COLOR,
         spikedash='dot',
         spikethickness=1,
         hoverformat='.2f'
     )
-
-    fig.update_yaxes(title_text='Volume', row=volume_row, col=1)
+    fig.update_yaxes(
+        row=price_row,
+        col=1,
+        tickfont=dict(color=PLOTLY_TICK_COLOR)
+    )
+    fig.update_yaxes(
+        title_text='Volume',
+        row=volume_row,
+        col=1,
+        titlefont=dict(color=PLOTLY_TICK_COLOR),
+        tickfont=dict(color=PLOTLY_TICK_COLOR)
+    )
     for idx, (name, _) in enumerate(oscillator_plot):
-        fig.update_yaxes(title_text=name, row=3 + idx, col=1)
-    fig.update_yaxes(title_text='Equity', row=equity_row, col=1)
-    fig.update_yaxes(title_text='Return %', row=returns_row, col=1)
-    fig.update_yaxes(title_text='Drawdown', row=drawdown_row, col=1, tickformat='.1%')
+        fig.update_yaxes(
+            title_text=name,
+            row=3 + idx,
+            col=1,
+            titlefont=dict(color=PLOTLY_TICK_COLOR),
+            tickfont=dict(color=PLOTLY_TICK_COLOR)
+        )
+    fig.update_yaxes(
+        title_text='Equity',
+        row=equity_row,
+        col=1,
+        titlefont=dict(color=PLOTLY_TICK_COLOR),
+        tickfont=dict(color=PLOTLY_TICK_COLOR)
+    )
+    fig.update_yaxes(
+        title_text='Return %',
+        row=returns_row,
+        col=1,
+        titlefont=dict(color=PLOTLY_TICK_COLOR),
+        tickfont=dict(color=PLOTLY_TICK_COLOR)
+    )
+    fig.update_yaxes(
+        title_text='Drawdown',
+        row=drawdown_row,
+        col=1,
+        tickformat='.1%',
+        titlefont=dict(color=PLOTLY_TICK_COLOR),
+        tickfont=dict(color=PLOTLY_TICK_COLOR)
+    )
+
+    for axis_row in range(1, total_rows + 1):
+        fig.update_yaxes(
+            row=axis_row,
+            col=1,
+            gridcolor=PLOTLY_INDICATOR_GRID,
+            linecolor=PLOTLY_AXIS_LINE,
+            zeroline=False,
+            tickfont=dict(color=PLOTLY_TICK_COLOR),
+            titlefont=dict(color=PLOTLY_TICK_COLOR)
+        )
 
     try:
         total_points = len(axis_list)
@@ -1469,6 +1706,13 @@ def build_figure(price_df, indicator_bundle: Optional[IndicatorBundle], equity, 
                 tickvals=tick_positions,
                 ticktext=tick_text,
                 automargin=True,
+                showgrid=True,
+                gridcolor=PLOTLY_INDICATOR_GRID,
+                linecolor=PLOTLY_AXIS_LINE,
+                zeroline=False,
+                tickfont=dict(size=10, color=PLOTLY_TICK_COLOR),
+                ticks='outside',
+                tickcolor=PLOTLY_TICK_COLOR,
                 **spike_style
             )
             for r in range(1, total_rows + 1):
@@ -1478,9 +1722,9 @@ def build_figure(price_df, indicator_bundle: Optional[IndicatorBundle], equity, 
                 col=1,
                 showticklabels=True,
                 ticklabelposition='outside top',
-                ticks='inside',
+                ticks='outside',
                 ticklen=4,
-                tickfont=dict(size=10)
+                tickfont=dict(size=10, color=PLOTLY_TICK_COLOR)
             )
             for r in range(1, total_rows + 1):
                 if r in (price_row, drawdown_row):
@@ -1491,7 +1735,7 @@ def build_figure(price_df, indicator_bundle: Optional[IndicatorBundle], equity, 
                 col=1,
                 showticklabels=True,
                 tickangle=0,
-                tickfont=dict(size=11)
+                tickfont=dict(size=11, color=PLOTLY_TICK_COLOR)
             )
         fig.update_yaxes(**spike_style)
     except Exception:
@@ -1640,19 +1884,38 @@ def get_main_layout():
                     markers=[],
                     chart_options={
                         'layout': {
-                            'backgroundColor': '#ffffff',
-                            'textColor': '#333333'
+                            'backgroundColor': '#060816',
+                            'textColor': '#cbd5f5'
+                        },
+                        'grid': {
+                            'vertLines': {'color': 'rgba(148,163,184,0.18)'},
+                            'horzLines': {'color': 'rgba(148,163,184,0.18)'}
                         },
                         'rightPriceScale': {
-                            'visible': True
+                            'visible': True,
+                            'borderColor': '#1f2937'
+                        },
+                        'leftPriceScale': {
+                            'visible': False
                         },
                         'timeScale': {
                             'timeVisible': True,
-                            'secondsVisible': False
+                            'secondsVisible': False,
+                            'borderColor': '#1f2937'
                         },
-                        'grid': {
-                            'vertLines': {'color': '#e5e5e5'},
-                            'horzLines': {'color': '#e5e5e5'}
+                        'crosshair': {
+                            'mode': 0,
+                            'vertLine': {
+                                'color': 'rgba(94,234,212,0.65)',
+                                'labelBackgroundColor': '#0f172a'
+                            },
+                            'horzLine': {
+                                'color': 'rgba(94,234,212,0.65)',
+                                'labelBackgroundColor': '#0f172a'
+                            }
+                        },
+                        'watermark': {
+                            'visible': False
                         }
                     },
                     style={'height': '600px'}

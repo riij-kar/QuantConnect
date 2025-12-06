@@ -69,19 +69,43 @@ class Algomain(QCAlgorithm):
 
         self.SetTimeZone(self.cfg.get("timezone"))
 
-        resolution_setting = str(self.cfg.get("base_resolution", "minute")).lower()
-        if resolution_setting not in ("minute", "daily"):
-            self.Debug(f"Unsupported base_resolution '{resolution_setting}', defaulting to minute.")
-            resolution_setting = "minute"
+        resolution_cfg = self.cfg.get("resolution", {}) or {}
+        resolution_setting = str(resolution_cfg.get("default", "MINUTE")).upper()
+        valid_resolutions = {
+            "TICK": Resolution.Tick,
+            "SECOND": Resolution.Second,
+            "MINUTE": Resolution.Minute,
+            "HOUR": Resolution.Hour,
+            "DAILY": Resolution.Daily,
+        }
+        if resolution_setting not in valid_resolutions:
+            self.Debug(
+                f"Unsupported resolution '{resolution_setting}', defaulting to MINUTE."
+            )
+            resolution_setting = "MINUTE"
 
-        if resolution_setting == "daily":
-            resolution = Resolution.Daily
-            timeframe_value = int(self.cfg.get("timeframe_days", 1) or 1)
-            consolidation_span = timedelta(days=max(1, timeframe_value))
-        else:
-            resolution = Resolution.Minute
-            timeframe_value = int(self.cfg.get("timeframe_minutes", 1) or 1)
-            consolidation_span = timedelta(minutes=max(1, timeframe_value))
+        resolution = valid_resolutions[resolution_setting]
+
+        period_value = resolution_cfg.get("period", 1)
+
+        try:
+            period_value = int(period_value or 1)
+        except (TypeError, ValueError):
+            self.Debug(
+                f"Invalid period '{period_value}' for resolution {resolution_setting}; defaulting to 1."
+            )
+            period_value = 1
+
+        period_value = max(1, period_value)
+
+        if resolution_setting == "DAILY":
+            consolidation_span = timedelta(days=period_value)
+        elif resolution_setting == "HOUR":
+            consolidation_span = timedelta(hours=period_value)
+        elif resolution_setting in ("SECOND", "TICK"):
+            consolidation_span = timedelta(seconds=period_value)
+        else:  # MINUTE and fallback
+            consolidation_span = timedelta(minutes=period_value)
 
         self.symbol = self.AddEquity(self.cfg.get("EquityName"), resolution, Market.India).Symbol
         self.indicators = build_indicators(self, self.symbol, self.cfg)
@@ -135,7 +159,7 @@ class Algomain(QCAlgorithm):
             self.SetWarmUp(warmup_bars)
 
         self.Debug(
-            f"Initialized with {resolution_setting} data; consolidating every {consolidation_span}"
+            f"Initialized with {resolution_setting.lower()} data; consolidating every {consolidation_span}"
         )
 
         self.consolidator = TradeBarConsolidator(consolidation_span)

@@ -8,9 +8,11 @@
     "endDate": "2025-11-17",
     "EquityName": "niftyopt",
     "default-cash": 1000000,
-    "base_resolution": "minute",
-    "timeframe_minutes": 5,
-    "timeframe_days": 1,
+    "resolution": {
+        "types": ["MINUTE", "HOUR", "SECOND", "TICK", "DAILY"],
+        "default": "MINUTE",
+        "period": 5
+    },
     "warmup_bars": 30,
     "indicator_params": {
         "ema_periods": [9, 21, 55],
@@ -20,12 +22,26 @@
         "atr_period": 14,
         "vwap_period": 30
     },
-    "stop_loss_offset": 10,
-    "take_profit_offset": 20,
-    "trade_limit": 5,
-    "risk_params": {
-        "atr_stop_loss": 3.0
-    },
+    "trade_settings": {
+        "position_size_percent_NOT_USED": 10,
+        "max_concurrent_trades_NOT_USED": 3,
+        "slippage_percent_NOT_USED": 0.05,
+        "commission_per_trade_NOT_USED": 1.0,
+        "min_trade_interval_minutes_NOT_USED": 15,
+        "use_trailing_stop_NOT_USED": true,
+        "trailing_stop_percent_NOT_USED": 0.1,
+        "use_fixed_stop_loss_NOT_USED": true,
+        "fixed_stop_loss_percent_NOT_USED": 0.2,
+        "use_take_profit_NOT_USED": true,
+        "take_profit_percent_NOT_USED": 0.4,
+        "use_time_based_exit_NOT_USED": false,
+        "risk_params_NOT_USED": {
+            "atr_stop_loss": 3.0
+        },
+        "stop_loss_offset": 10,
+        "take_profit_offset": 20,
+        "trade_limit": 5
+    },    
     "strategy": "mean_reversion",
     "ui": {
         "timezone": "Asia/Kolkata",
@@ -58,7 +74,10 @@
             "rsi": {
                 "period": 14,
                 "overbought": 70,
-                "oversold": 30
+                "oversold": 30,
+                "middle": 50,
+                "ma_type": "SMA",
+                "ma_type_period": 14
             },
             "macd": {
                 "source": "close",

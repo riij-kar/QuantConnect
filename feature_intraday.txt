@@ -1,0 +1,250 @@
+Okay i will be implement a system for generating intraday signals only, not trading systems. 
+Signals will be generated based on few criteria. one is price closed above or below 
+ema9, ema 15 and ema55 and above vwap. i am going to use data from broker , 
+which i will use their api(https://api.dhan.co/v2/#/) and python client(https://github.com/dhan-oss/DhanHQ-py) 
+idea is system will use websocket connection, getting the data(almost 2000 stocks) and 
+perform the calculation and send me the data i am looking for. 
+Help me to draft a step by step plan(later will be using with copilot) from start to finish implementing such system in detail.
+
+Answer::::::::::::::::::
+Nice — clear goal. Below is a concrete, **actionable end-to-end plan** you can hand to Copilot and implement with `python intraday.py`. It’s tuned for live-only intraday signals (no backtests), will use Dhan’s API/websocket for market data, is robust for ~2k symbols, and keeps things modular so you can extend later (alerts, persistence, GUI, order placement).
+
+I read the Dhan API spec you’ll use (charts/intraday, alerts, websocket patterns etc.) — keep that open while implementing. 
+
+---
+
+# Quick overview / goal
+
+Standalone CLI: `python intraday.py --config config.yml`
+Behavior: open websocket(s) to broker, compute EMA9/15/55 + VWAP (configurable lengths), generate signals when criteria match (e.g. close > EMA9/15/55 and > VWAP), deduplicate while trade-state active, push results to output (stdout, file, websocket, webhook). Must handle ~2000 tickers and be memory/CPU efficient.
+
+---
+
+# High level architecture (modules)
+
+Project layout (suggestion)
+
+```
+intraday-signal/
+├─ intraday.py                # CLI entrypoint
+├─ config.yml                 # user config (symbols, indicators, thresholds)
+├─ requirements.txt
+|─ assets/
+|   ├─{name}.csv
+├─ core/
+│  ├─ ws_client.py            # websocket subscriber & reconnect logic
+│  ├─ scheduler.py            # orchestrates symbol batches, heartbeats
+│  ├─ ringbuffer.py           # efficient per-symbol rolling store
+│  └─ signals.py              # signal manager + state machine (emit/lock)
+├─ indicators/
+│  ├─ ema.py
+│  ├─ vwap.py
+│  └─ aggregates.py           # utilities
+├─ storage/
+│  ├─ persist.py              # optional: sqlite / file dumps
+│  └─ snapshots.py
+├─ outputs/
+│  ├─ webhook.py
+│  ├─ csv_writer.py
+│  └─ console.py
+├─ strategies/
+│  └─ ema_vwap.py             # single strategy implementation
+└─ utils/
+   ├─ tz.py
+   └─ logging_cfg.py
+```
+
+---
+
+# Step-by-step plan (detailed)
+
+## 1) Project bootstrap
+
+1. Create virtualenv, install libs: `pip install -r requirements.txt`.
+2. Minimal requirements: `pandas`, `numpy`, `aiohttp` (or `websockets`), `uvloop` (optional on linux), `pydantic` (config validation), `PyYAML`, `fastapi` (optional for local HTTP), `python-dateutil`.
+3. Add `requirements.txt` and `config.yml` template.
+
+## 2) Config design
+
+`config.yml` should contain:
+
+```yaml
+dhan:
+  api_key: "xxxx"
+  websocket_url: "wss://stream.dhan.co/..."   # from broker docs
+symbols:
+  - NSE:RELIANCE
+  - NSE:TCS
+indicators:
+  ema_periods: [9,15,55]
+  vwap: true
+  rsi_period: 14
+strategy:
+  min_distance_ema21: 0.2   # points or percent
+  min_capture_points: 20
+  stop_loss: 10
+output:
+  webhook: "https://myhook"
+  csv_dir: "./signals"
+performance:
+  batch_size: 300   # how many symbols per subscription group
+  update_interval_ms: 1000
+```
+
+Make everything configurable.
+
+## 3) Websocket + data ingestion (core/ws_client.py)
+
+* Use an **async** websocket client (aiohttp or websockets).
+* Implement reconnection + exponential backoff + monitoring.
+* Subscribe in **batches** (e.g., 200–500 symbols per connection) if Dhan requires subscription limits; otherwise a single optimized connection.
+* Parse each tick message into a normalized dict: `{symbol, timestamp_utc, price, volume, open, high, low, close}`.
+* Push the tick into a per-symbol ring buffer (keep only last `N` minutes/candles required for indicators).
+
+Important: **timestamp alignment** — broker timestamps may be in a timezone or seconds since a custom epoch. Normalize to `pandas.Timestamp` in UTC and then convert to exchange local time if needed.
+
+## 4) Per-symbol rolling storage (core/ringbuffer.py)
+
+* Use a fixed-length numpy array or deque for OHLC and volumes.
+* For minute-based aggregation from ticks: implement a lightweight aggregator that collects intra-minute ticks and produces 1-min OHLC+vol every minute (or every configured interval). This avoids reprocessing huge arrays.
+* Keep enough history for largest indicator (e.g., EMA55 + some slack).
+
+## 5) Indicators (indicators/*.py)
+
+* Implement streaming versions of indicators (no need to recompute whole series each time):
+
+  * EMA: streaming update `ema_new = alpha * price + (1-alpha) * ema_prev`.
+  * VWAP: cumulative within session: `vwap = sum(price*vol)/sum(vol)` (reset each session).
+  * RSI etc. (if needed): implement streaming Wilder RSI or use vectorized fallback when updating per minute.
+* Use pure-python numpy/pandas-free incremental formulas to minimize overhead.
+* Keep indicator state per symbol.
+
+## 6) Strategy & State machine (core/signals.py + strategies/ema_vwap.py)
+
+* **State concept** per symbol: `IDLE`, `IN_SIGNAL` (or `TRACKING`), `COOLDOWN`.
+* On every new candle (or consolidated timeframe event):
+
+  1. Evaluate entry conditions.
+  2. If conditions `True` and state == `IDLE` -> emit signal and set state to `IN_SIGNAL` with metadata (entry_time, entry_price, target, sl).
+  3. While state == `IN_SIGNAL`, ignore duplicate entries even if criteria still hold (prevents multiple hits) — only allow re-entry after state resets to `IDLE` or enters `COOLDOWN`.
+  4. Implement explicit exit conditions: target reached, stop-loss reached, or close below previous candle low (per your rule).
+  5. After exit, set `COOLDOWN` for N candles or N seconds (configurable) to avoid churn.
+* Store state persistently (in-memory and periodic checkpoint to disk) so you can restart without losing open signals.
+
+## 7) Output & Delivery
+
+* Implement multiple outputs: console, CSV, webhook, local message queue (redis), or MQTT.
+* JSON format for signals:
+
+```json
+{
+  "symbol": "NSE:RELIANCE",
+  "time": "2025-11-17T09:30:00Z",
+  "type": "ENTRY",
+  "price": 2500.5,
+  "indicators": {"ema9": 2498.2, "ema15": 2497.1, "vwap": 2496.8},
+  "state_id": "xxxx"
+}
+```
+
+* If you want instant notifications, use a lightweight webhook POST to a small FastAPI endpoint you run locally.
+
+## 8) Scalability & batching
+
+* DO NOT compute expensive vector ops per tick for all 2000 symbols. Instead:
+
+  * Aggregate ticks -> 1-min (or your chosen timeframe) bars.
+  * Trigger indicator updates only at bar completion (or at fractional seconds if you need tick signals).
+  * Use `batch_size` to limit number of active subscriptions processed each event loop iteration. Spread CPU load.
+* Consider distributing across processes if a single machine is CPU-bound: shard by symbol ranges.
+
+## 9) Reliability & safety
+
+* Heartbeats and healthchecks.
+* Persistent small DB (sqlite) to store recent states and emitted signals.
+* Graceful shutdown handler to flush states.
+* Timeout for reconnection attempts and alerting (email/slack) if data feed down.
+
+## 10) Observability & debugging
+
+* Structured logs (json), per-symbol counters, metrics via Prometheus (optional).
+* A local dashboard (simple FastAPI + endpoint returning last N signals) or a CSV/JSON folder.
+* Log important events: reconnects, errors, state transitions, signal emits.
+
+## 11) Testing locally / dry-run
+
+* Add a `--dry-run` flag that reads historical intraday data (CSV) and runs the same pipeline for functional verification.
+* Use small symbol sets first (10–50) and measure CPU/memory.
+* Test timezone edge-cases: pre-open and post-close.
+
+---
+
+# Minimal code skeleton (important pieces)
+
+Below is a tiny skeleton to get started — **streaming EMA + websocket consumer** (conceptual, run after adapting to Dhan messages):
+
+```python
+# core/ws_client.py (simplified)
+import asyncio, json, aiohttp
+from core.ringbuffer import SymbolStore
+from indicators.ema import StreamingEMA
+
+async def handle_message(msg, store, signal_mgr):
+    # parse tick from Dhan
+    tick = json.loads(msg)  # adapt to actual shape
+    symbol = tick['symbol']
+    price = float(tick['lastPrice'])
+    ts = pd.to_datetime(tick['timestamp'], unit='s', utc=True)
+    store.add_tick(symbol, ts, price, tick.get('volume',0))
+    if store.bar_completed(symbol):
+        bar = store.get_last_bar(symbol)
+        # update indicators
+        ema9 = store.symbol_state(symbol).ema9.update(bar.close)
+        # strategy check
+        signal_mgr.evaluate(symbol, bar, indicators={'ema9':ema9})
+        
+async def ws_consumer(url, symbols, store, signal_mgr):
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(url) as ws:
+            await ws.send_json({"op":"subscribe","symbols":symbols})
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    await handle_message(msg.data, store, signal_mgr)
+```
+
+And a `signals.py` state manager that tracks `IDLE`/`IN_SIGNAL` and cooldowns.
+
+---
+
+# Practical implementation details & tradeoffs
+
+* **Indicator library**: don’t use TA-Lib C-bindings for streaming (hard to update incrementally). Implement simple streaming EMA, VWAP yourself. Use `pandas_ta` or `ta` only for offline/backtest verification.
+* **Precision & time alignment**: Broker timestamps sometimes skip minutes or have gaps. Always align bars to canonical minute timestamps (e.g., `09:15:00`, `09:16:00`) and fill missing bars (or treat missing as no-trade).
+* **Dedup logic**: When entry condition is true, lock entry for that symbol until exit or cooldown. Avoid simply checking booleans each bar.
+* **Session resets**: VWAP must reset every trading day (or at session boundary). Handle market opens/closes.
+* **Memory**: For 2000 symbols with small ringbuffers (say 200 bars), memory is tiny. CPU is the main cost — measure and optimize.
+* **Network**: Ensure websocket bulk subscribe limits from Dhan; if they limit, shard across connections.
+
+---
+
+# Deployment & run
+
+* Run locally: `python intraday.py --config config.yml`
+* For production: run inside systemd on linux or PM2-like supervisor. Use watch-dog and restart policy.
+* Logs to rotating file; snapshot state every N minutes.
+
+---
+
+# Next steps I can deliver immediately (pick one)
+
+1. Generate a **complete skeleton repo** (files above + small implementation of ws_client + streaming EMA + state machine) you can `git clone` and run (I’ll produce code).
+2. Produce the **`intraday.py` single-file** minimal working prototype that:
+
+   * opens a mock websocket (or HTTP streaming),
+   * simulates ticks for 50 symbols,
+   * computes EMA9/15/55 + VWAP streaming,
+   * emits console signals with correct state locking.
+3. Produce the **config.yml + README** and the recommended `requirements.txt`.
+
+Tell me which of the three you want now and I’ll generate it (I can output the codebase right here). If you want the full skeleton repo, I’ll include `intraday.py`, `core/`, `indicators/`, and README with run instructions.
+
