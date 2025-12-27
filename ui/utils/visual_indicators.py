@@ -242,23 +242,67 @@ def compute_visual_indicators(price_df: Optional[pd.DataFrame], indicator_config
         period = int(rsi_cfg.get("period", 14))
         rsi_values = talib.RSI(close_arr, timeperiod=period)
         levels: List[tuple[str, float]] = []
+        overbought_val: Optional[float] = None
+        oversold_val: Optional[float] = None
+        middle_val: Optional[float] = None
+
         overbought = rsi_cfg.get("overbought")
         oversold = rsi_cfg.get("oversold")
+        middle = rsi_cfg.get("middle")
+
         try:
             if overbought is not None:
-                levels.append(("Overbought", float(overbought)))
+                overbought_val = float(overbought)
+                levels.append(("Overbought", overbought_val))
         except (TypeError, ValueError):
             messages.append("RSI overbought level invalid; skipping line.")
         try:
             if oversold is not None:
-                levels.append(("Oversold", float(oversold)))
+                oversold_val = float(oversold)
+                levels.append(("Oversold", oversold_val))
         except (TypeError, ValueError):
             messages.append("RSI oversold level invalid; skipping line.")
-        oscillators[f"RSI ({period})"] = {
+        try:
+            if middle is not None:
+                middle_val = float(middle)
+                levels.append(("Middle", middle_val))
+        except (TypeError, ValueError):
+            messages.append("RSI middle level invalid; skipping line.")
+
+        smoothing_cfg = None
+        ma_period_raw = rsi_cfg.get("ma_type_period")
+        try:
+            ma_period = int(ma_period_raw) if ma_period_raw is not None else 0
+        except (TypeError, ValueError):
+            messages.append("RSI moving-average period invalid; smoothing skipped.")
+            ma_period = 0
+        ma_label = None
+        ma_series = None
+        if ma_period and ma_period > 0:
+            ma_type_name = str(rsi_cfg.get("ma_type", "SMA"))
+            ma_type = _resolve_ma_type(ma_type_name)
+            ma_values = talib.MA(rsi_values, timeperiod=ma_period, matype=ma_type)
+            if not np.isnan(ma_values).all():
+                ma_label = f"{ma_type_name.upper()} ({ma_period})"
+                ma_series = _as_series(ma_values, price_df.index, ma_label)
+                smoothing_cfg = {
+                    "series": ma_series,
+                    "label": ma_label,
+                    "ma_type": ma_type_name.upper(),
+                    "period": ma_period
+                }
+
+        entry: Dict[str, Any] = {
             "type": "line",
             "series": _as_series(rsi_values, price_df.index, "RSI"),
             "levels": levels,
+            "overbought": overbought_val,
+            "oversold": oversold_val,
+            "middle": middle_val
         }
+        if smoothing_cfg:
+            entry["smoothing"] = smoothing_cfg
+        oscillators[f"RSI ({period})"] = entry
 
     # MACD
     macd_cfg = indicator_config.get("macd") or {}

@@ -6,6 +6,7 @@ from QuantConnect.Data.Consolidators import TradeBarConsolidator
 from QuantConnect.Data.Market import TradeBar
 from QuantConnect.Indicators.CandlestickPatterns import *  # noqa: F401,F403
 from collections import deque
+from utils.shared import resolve_log_dir
 
 RAW_PATTERN_NAMES: List[str] = [
     "Abandoned Baby",
@@ -170,15 +171,10 @@ class CandlestickPatternManager:
         self.signal_history: Dict[str, deque] = {}
         self.timeframe_meta: Dict[str, Dict[str, int]] = {}
         self._consolidators: Dict[str, TradeBarConsolidator] = {}
-        base_time = datetime.now()
-        timestamp = base_time.strftime("%Y-%m-%d_%H-%M-%S")
-        backtests_root = os.path.join(algo_directory, "backtests")
-        latest_backtest_dir = self._resolve_latest_backtest_dir(backtests_root)
-        if latest_backtest_dir is None:
-            self.log_dir = os.path.join(backtests_root, f"{timestamp}_patterns")
-        else:
-            self.log_dir = os.path.join(latest_backtest_dir, "patterns")
+        
+        self.log_dir = resolve_log_dir(algo_directory, "patterns")
         self.log_path = os.path.join(self.log_dir, "patterns_generated.log")
+        
         self._build_detectors()
         for frame in self.DEFAULT_MINUTE_FRAMES:
             self.ensure_timeframe(frame)
@@ -536,38 +532,6 @@ class CandlestickPatternManager:
         with open(self.log_path, "w", encoding="utf-8") as handle:
             handle.write("\n".join(self.log_entries))
         self.algorithm.Debug(f"CandlestickPatternManager: Candlestick pattern log written to {self.log_path}")
-
-
-    @staticmethod
-    def _resolve_latest_backtest_dir(backtests_root: str) -> Optional[str]:
-        """Return the most recently created backtest directory, if any.
-
-        Parameters
-        ----------
-        backtests_root : str
-            Absolute path to the ``backtests`` folder that contains run
-            snapshots.
-
-        Returns
-        -------
-        Optional[str]
-            Full path to the newest run folder, or ``None`` when the root is
-            missing or contains no runs.
-        """
-        if not os.path.isdir(backtests_root):
-            return None
-        candidates: List[str] = []
-        for entry in os.listdir(backtests_root):
-            full_path = os.path.join(backtests_root, entry)
-            if not os.path.isdir(full_path):
-                continue
-            if entry.endswith("_patterns") or entry == "patterns":
-                continue
-            candidates.append(full_path)
-        if not candidates:
-            return None
-        candidates.sort(key=lambda path: os.path.basename(path))
-        return candidates[-1]
 
 
 def _create_detector(pattern_name: str) -> Callable[[CandlestickPatternManager, str, datetime, float], None]:

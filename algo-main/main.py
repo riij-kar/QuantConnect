@@ -24,6 +24,8 @@ import os
 #     └── data_converter.py
 
 
+from utils.price_action_patterns import PriceActionPatterns
+
 class Algomain(QCAlgorithm):
     """Lean algorithm entry point wiring strategy, indicators, and logging."""
 
@@ -69,27 +71,77 @@ class Algomain(QCAlgorithm):
 
         self.SetTimeZone(self.cfg.get("timezone"))
 
-        resolution_setting = str(self.cfg.get("base_resolution", "minute")).lower()
-        if resolution_setting not in ("minute", "daily"):
-            self.Debug(f"Unsupported base_resolution '{resolution_setting}', defaulting to minute.")
-            resolution_setting = "minute"
+        resolution_cfg = self.cfg.get("resolution", {}) or {}
+        resolution_setting = str(resolution_cfg.get("default", "MINUTE")).upper()
+        valid_resolutions = {
+            "TICK": Resolution.Tick,
+            "SECOND": Resolution.Second,
+            "MINUTE": Resolution.Minute,
+            "HOUR": Resolution.Hour,
+            "DAILY": Resolution.Daily,
+        }
+        if resolution_setting not in valid_resolutions:
+            self.Debug(
+                f"Unsupported resolution '{resolution_setting}', defaulting to MINUTE."
+            )
+            resolution_setting = "MINUTE"
 
-        if resolution_setting == "daily":
-            resolution = Resolution.Daily
-            timeframe_value = int(self.cfg.get("timeframe_days", 1) or 1)
-            consolidation_span = timedelta(days=max(1, timeframe_value))
-        else:
-            resolution = Resolution.Minute
-            timeframe_value = int(self.cfg.get("timeframe_minutes", 1) or 1)
-            consolidation_span = timedelta(minutes=max(1, timeframe_value))
+        resolution = valid_resolutions[resolution_setting]
+
+        period_value = resolution_cfg.get("period", 1)
+
+        try:
+            period_value = int(period_value or 1)
+        except (TypeError, ValueError):
+            self.Debug(
+                f"Invalid period '{period_value}' for resolution {resolution_setting}; defaulting to 1."
+            )
+            period_value = 1
+
+        period_value = max(1, period_value)
+
+        if resolution_setting == "DAILY":
+            consolidation_span = timedelta(days=period_value)
+        elif resolution_setting == "HOUR":
+            consolidation_span = timedelta(hours=period_value)
+        elif resolution_setting in ("SECOND", "TICK"):
+            consolidation_span = timedelta(seconds=period_value)
+        else:  # MINUTE and fallback
+            consolidation_span = timedelta(minutes=period_value)
 
         self.symbol = self.AddEquity(self.cfg.get("EquityName"), resolution, Market.India).Symbol
         self.indicators = build_indicators(self, self.symbol, self.cfg)
-        self.pattern_tracker = CandlestickPatternManager(
-            self,
-            self.symbol,
-            algo_dir,
-        )
+        
+        # Initialize Pattern Managers
+        price_action_cfg = self.cfg.get("price_action_candlestick", {})
+        
+        # 1. Candlestick Pattern Manager
+        candlestick_cfg = price_action_cfg.get("candlestick", {})
+        self.candlestick_pattern_manager = None
+        if candlestick_cfg.get("enabled", False):
+            self.candlestick_pattern_manager = CandlestickPatternManager(
+                self,
+                self.symbol,
+                algo_dir,
+            )
+            
+        # 2. Price Action Pattern Engine
+        pa_cfg = price_action_cfg.get("price_action", {})
+        self.price_action_engine = None
+        if pa_cfg.get("enabled", False):
+            lookback = int(pa_cfg.get("lookback_bars", 100))
+            
+            # Create the RollingWindow here with the configured lookback
+            window = RollingWindow[TradeBar](lookback)
+            
+            self.price_action_engine = PriceActionPatterns(
+                algorithm=self,
+                lookback_period=lookback,
+                window=window, 
+                indicators=self.indicators,
+                algo_dir=algo_dir
+            )
+
         self.strategy_bundle = load_strategy(self.cfg.get("strategy"))
         self.strategy = self.strategy_bundle.strategy
 
@@ -135,9 +187,9 @@ class Algomain(QCAlgorithm):
             self.SetWarmUp(warmup_bars)
 
         self.Debug(
-            f"Initialized with {resolution_setting} data; consolidating every {consolidation_span}"
+            f"Initialized with {resolution_setting.lower()} data; consolidating every {consolidation_span}"
         )
-
+        
         self.consolidator = TradeBarConsolidator(consolidation_span)
         self.consolidator.DataConsolidated += self.OnDataConsolidated
         self.SubscriptionManager.AddConsolidator(self.symbol, self.consolidator)
@@ -195,8 +247,10 @@ class Algomain(QCAlgorithm):
 
     def OnEndOfAlgorithm(self):
         """Flush pattern logs to disk when the backtest or live session ends."""
-        if hasattr(self, "pattern_tracker"):
-            self.pattern_tracker.flush()
+        if self.candlestick_pattern_manager:
+            self.candlestick_pattern_manager.flush()
+        if self.price_action_engine:
+            self.price_action_engine.flush()
         # with open("backtests/trade_log.json", "w") as f:
         #     json.dump(self.trade_log, f, indent=4)
 
