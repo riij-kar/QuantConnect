@@ -25,7 +25,54 @@ Continuation Pattern :
         A descending triangle is an inverted version of the ascending triangle and is considered a breakdown pattern. The lower trendline should be horizontal, connecting near identical lows. The upper trendline declines diagonally toward the apex.
         The breakdown occurs when the price collapses through the lower horizontal trendline support as a downtrend resumes. The lower trendline, which was support, now becomes resistance.
       Symmetric:
-        
+
   Pennant:
   Flag:
   Rectangle:
+
+
+
+
+  question:
+  Okay till now everything is good so far, now focusing on implement one by one definition .lets start with def calculate_double_tops pattern. I need you to generate the code based on below psychology:
+Identifying a Double Top Pattern
+Identifying a double top involves key steps, though each case may differ slightly. False signals can mislead investors into thinking a double top is forming. Here's how to identify one.
+
+Look for an Upswing: The price movement should be clearly in an uptrend prior to the creation of a double top. This indicates that the price has been making continuously higher highs and higher lows.
+Find the Initial Peak: Determine the uptrend's first peak. The price has now risen to its maximum level before beginning to fall.
+Find the Trough: Following the initial peak, the price will briefly fall. Find the valley or trough that develops following the initial peak.
+Find the Second Peak: The price will then rise once more in an effort to hit a new high. But this second rally will fall short of the first peak's height and begin to collapse once more.
+Verify the Pattern: To verify a double top pattern, make sure the decline that follows the second peak is lower than the trough that follows the first peak. This demonstrates that the previous resistance level was not successfully overcome by the price.
+Draw the Neckline. Connect the low points of the two troughs with a horizontal line. This is the neckline, which denotes a level of support. It serves as an essential pattern reference.
+Verify Double Top Pattern: To verify the double-top pattern, watch for a price break below the neckline. Breaking below the neckline might be interpreted as a sell signal because it portends a potential trend reversal.
+Essential Components of a Double Top Pattern
+As you identify double-top formations, consider the following key elements:
+
+Uptrend: The price should clearly be moving upward before the pattern forms, as seen by higher highs and higher lows.
+Two Peaks: The pattern consists of two peaks that roughly correspond to one another in terms of price. These peaks serve as resistance levels where the price stalls and begins to fall.
+Trough or Valley: A trough or valley has formed between the two peaks. This denotes a brief period of price decline or consolidation.
+Neckline: The neckline is a horizontal line that is created by joining the valley or trough low points. It serves as a degree of support and is essential for confirming the pattern.
+Break of Neckline: The break of the neckline is a key component of the double top pattern. When the price drops below the neckline, suggesting a potential trend reversal, the pattern is verified.
+Volume: Volume can add to our understanding of the pattern. Volume often increases when the price breaks below the neckline and decreases throughout the creation of the two peaks. The validity of the pattern may be strengthened by this rise in volume on the breakdown.
+Price Goal: After the breakdown, project this distance downward from the neckline. This can offer a rough point of reference for the price decline.
+
+I need you to generate details in sequence below:
+1. The Visual Roadmap, something like below:
+       Phase 2      Phase 3
+      (The Dip)    (The Retry)
+          ↓            ↑
+      Peak 1        Peak 2
+       ____          ____
+      /    \        /    \
+     /      \      /      \      Phase 5
+    /        \    /        \    (The Crash)
+   /          \__/          \        ↓
+  /          (Neckline)      \     _ _ _ _  <-- BREAKOUT!
+ /              ↑             \   /
+Phase 1      Support           \ /
+(The Rise)   Level              ↓
+
+2. Mathematical Definition of the Pattern
+3. Logical Breakdown of the Algorithm
+4. Production grade and optimal python logic(align with the psychology mentioned above) which should be aligned with the current price_action_pattern.py you generated. uploaded the the price_action_pattern.py(updated) i am looking for using a segmented approach rather than a pure random walk. This ensures the geometry adheres to the definition of a Double Top, you responded before. meaning above psychology should comply with the geometry.
+5. At the end explain the code you generated.

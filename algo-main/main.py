@@ -24,6 +24,8 @@ import os
 #     └── data_converter.py
 
 
+from utils.price_action_patterns import PriceActionPatterns
+
 class Algomain(QCAlgorithm):
     """Lean algorithm entry point wiring strategy, indicators, and logging."""
 
@@ -109,11 +111,37 @@ class Algomain(QCAlgorithm):
 
         self.symbol = self.AddEquity(self.cfg.get("EquityName"), resolution, Market.India).Symbol
         self.indicators = build_indicators(self, self.symbol, self.cfg)
-        self.pattern_tracker = CandlestickPatternManager(
-            self,
-            self.symbol,
-            algo_dir,
-        )
+        
+        # Initialize Pattern Managers
+        price_action_cfg = self.cfg.get("price_action_candlestick", {})
+        
+        # 1. Candlestick Pattern Manager
+        candlestick_cfg = price_action_cfg.get("candlestick", {})
+        self.candlestick_pattern_manager = None
+        if candlestick_cfg.get("enabled", False):
+            self.candlestick_pattern_manager = CandlestickPatternManager(
+                self,
+                self.symbol,
+                algo_dir,
+            )
+            
+        # 2. Price Action Pattern Engine
+        pa_cfg = price_action_cfg.get("price_action", {})
+        self.price_action_engine = None
+        if pa_cfg.get("enabled", False):
+            lookback = int(pa_cfg.get("lookback_bars", 100))
+            
+            # Create the RollingWindow here with the configured lookback
+            window = RollingWindow[TradeBar](lookback)
+            
+            self.price_action_engine = PriceActionPatterns(
+                algorithm=self,
+                lookback_period=lookback,
+                window=window, 
+                indicators=self.indicators,
+                algo_dir=algo_dir
+            )
+
         self.strategy_bundle = load_strategy(self.cfg.get("strategy"))
         self.strategy = self.strategy_bundle.strategy
 
@@ -161,7 +189,7 @@ class Algomain(QCAlgorithm):
         self.Debug(
             f"Initialized with {resolution_setting.lower()} data; consolidating every {consolidation_span}"
         )
-
+        
         self.consolidator = TradeBarConsolidator(consolidation_span)
         self.consolidator.DataConsolidated += self.OnDataConsolidated
         self.SubscriptionManager.AddConsolidator(self.symbol, self.consolidator)
@@ -219,8 +247,10 @@ class Algomain(QCAlgorithm):
 
     def OnEndOfAlgorithm(self):
         """Flush pattern logs to disk when the backtest or live session ends."""
-        if hasattr(self, "pattern_tracker"):
-            self.pattern_tracker.flush()
+        if self.candlestick_pattern_manager:
+            self.candlestick_pattern_manager.flush()
+        if self.price_action_engine:
+            self.price_action_engine.flush()
         # with open("backtests/trade_log.json", "w") as f:
         #     json.dump(self.trade_log, f, indent=4)
 

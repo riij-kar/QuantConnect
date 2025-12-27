@@ -4,9 +4,10 @@
     "description": "",
     "local-id": 974760621,
     "timezone": "Asia/Kolkata",
-    "startDate": "2025-10-17",
-    "endDate": "2025-11-17",
-    "EquityName": "niftyopt",
+    "startDate": "2025-07-14",
+    "endDate": "2025-08-22",
+    "EquityName": "jiofin",
+    "isBacktestingOptionCharts_NOT_USED": true,
     "default-cash": 1000000,
     "resolution": {
         "types": ["MINUTE", "HOUR", "SECOND", "TICK", "DAILY"],
@@ -21,6 +22,29 @@
         "bb_std_dev": 2,
         "atr_period": 14,
         "vwap_period": 30
+    },
+    "price_action_candlestick": {
+        "price_action": {
+            "enabled": true,
+            "lookback_bars": 100,
+            "double_top_bottom_settings_NOT_USED": {
+                "min_height_percent": 0.5,
+                "max_height_percent": 10.0,
+                "min_duration_bars": 5,
+                "max_duration_bars": 50,
+                "confirmation_bars": 3
+            }
+        },
+        "candlestick": {
+            "enabled": true,
+            "double_top_bottom_settings_NOT_USED": {
+                "min_height_percent": 0.5,
+                "max_height_percent": 10.0,
+                "min_duration_bars": 5,
+                "max_duration_bars": 50,
+                "confirmation_bars": 3
+            }
+        }
     },
     "trade_settings": {
         "position_size_percent_NOT_USED": 10,

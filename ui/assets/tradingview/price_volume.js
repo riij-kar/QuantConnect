@@ -423,6 +423,155 @@
         }
         var overlays = normalizeOverlayPayload(props && props.overlays);
         syncOverlays(instance, overlays);
+        applyMeta(instance, props && props.meta);
+    }
+
+    function pad2(value) {
+        var num = typeof value === 'number' ? value : parseInt(value, 10);
+        if (!isFinite(num)) {
+            num = 0;
+        }
+        return num < 10 ? '0' + Math.trunc(num) : String(Math.trunc(num));
+    }
+
+    function normalizeToSeconds(time) {
+        if (time == null) {
+            return null;
+        }
+        if (typeof time === 'number' && isFinite(time)) {
+            return time;
+        }
+        if (typeof time === 'object') {
+            if (typeof time.timestamp === 'number') {
+                return time.timestamp;
+            }
+            if (typeof time.value === 'number') {
+                return time.value;
+            }
+            var year = typeof time.year === 'number' ? time.year : null;
+            var month = typeof time.month === 'number' ? time.month : null;
+            var day = typeof time.day === 'number' ? time.day : null;
+            if (year !== null && month !== null && day !== null) {
+                return Date.UTC(year, month - 1, day) / 1000;
+            }
+        }
+        return null;
+    }
+
+    var MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+    function describeTickMarkType(type) {
+        if (typeof type === 'string') {
+            return type;
+        }
+        switch (type) {
+            case 0: return 'Year';
+            case 1: return 'Month';
+            case 2: return 'DayOfMonth';
+            case 3: return 'Time';
+            case 4: return 'TimeWithSeconds';
+            default: return 'Time';
+        }
+    }
+
+    function buildCrosshairFormatter(meta) {
+        var label = '';
+        if (meta && typeof meta.timezoneLabel === 'string' && meta.timezoneLabel.length) {
+            label = meta.timezoneLabel;
+        } else if (meta && typeof meta.timezoneOffsetLabel === 'string' && meta.timezoneOffsetLabel.length) {
+            label = meta.timezoneOffsetLabel;
+        } else if (meta && typeof meta.timezone === 'string' && meta.timezone.length) {
+            label = meta.timezone;
+        }
+        return function (time) {
+            var seconds = normalizeToSeconds(time);
+            if (seconds === null) {
+                return '';
+            }
+            var date = new Date(seconds * 1000);
+            if (isNaN(date.getTime())) {
+                return '';
+            }
+            var dayPart = date.getUTCFullYear() + '-' + pad2(date.getUTCMonth() + 1) + '-' + pad2(date.getUTCDate());
+            var timePart = pad2(date.getUTCHours()) + ':' + pad2(date.getUTCMinutes());
+            return label ? dayPart + ' ' + timePart + ' ' + label : dayPart + ' ' + timePart;
+        };
+    }
+
+    function buildTickFormatter(meta, tradingDaySet) {
+        var lastMonthTag = null;
+        return function (time, tickMarkType) {
+            var seconds = normalizeToSeconds(time);
+            if (seconds === null) {
+                return '';
+            }
+            var date = new Date(seconds * 1000);
+            if (isNaN(date.getTime())) {
+                return '';
+            }
+            var type = describeTickMarkType(tickMarkType);
+            switch (type) {
+                case 'Year':
+                    return String(date.getUTCFullYear());
+                case 'Month':
+                    return MONTH_NAMES[date.getUTCMonth()] + ' ' + String(date.getUTCFullYear()).slice(-2);
+                case 'DayOfMonth':
+                case 'DayOfWeek': {
+                    var dayKey = date.getUTCFullYear() + '-' + pad2(date.getUTCMonth() + 1) + '-' + pad2(date.getUTCDate());
+                    if (tradingDaySet && !tradingDaySet.has(dayKey)) {
+                        return '';
+                    }
+                    var day = date.getUTCDate();
+                    var monthTag = date.getUTCFullYear() + '-' + date.getUTCMonth();
+                    if (day === 1 && monthTag !== lastMonthTag) {
+                        lastMonthTag = monthTag;
+                        return pad2(day) + ' ' + MONTH_NAMES[date.getUTCMonth()];
+                    }
+                    return String(day);
+                }
+                case 'TimeWithSeconds':
+                    return pad2(date.getUTCHours()) + ':' + pad2(date.getUTCMinutes()) + ':' + pad2(date.getUTCSeconds());
+                case 'Time':
+                default:
+                    return pad2(date.getUTCHours()) + ':' + pad2(date.getUTCMinutes());
+            }
+        };
+    }
+
+    function applyMeta(instance, rawMeta) {
+        if (!instance || !instance.chart || typeof instance.chart.applyOptions !== 'function') {
+            return;
+        }
+        var meta = rawMeta && typeof rawMeta === 'object' ? rawMeta : {};
+        var signature = JSON.stringify(meta);
+        if (instance.__metaSignature === signature) {
+            return;
+        }
+        instance.__metaSignature = signature;
+        var hasLabel = Boolean(
+            meta && (
+                (typeof meta.timezoneLabel === 'string' && meta.timezoneLabel.length) ||
+                (typeof meta.timezoneOffsetLabel === 'string' && meta.timezoneOffsetLabel.length) ||
+                (typeof meta.timezone === 'string' && meta.timezone.length)
+            )
+        );
+        if (!hasLabel) {
+            instance.chart.applyOptions({
+                localization: { timeFormatter: null },
+                timeScale: { tickMarkFormatter: null }
+            });
+            return;
+        }
+        var tradingDaySet = null;
+        if (meta && Array.isArray(meta.tradingDays) && meta.tradingDays.length) {
+            tradingDaySet = new Set(meta.tradingDays);
+        }
+        var crosshairFormatter = buildCrosshairFormatter(meta);
+        var tickFormatter = buildTickFormatter(meta, tradingDaySet);
+        instance.chart.applyOptions({
+            localization: { timeFormatter: crosshairFormatter },
+            timeScale: { tickMarkFormatter: tickFormatter }
+        });
     }
 
     function syncOverlays(instance, overlays) {
@@ -666,7 +815,7 @@
         destroy: destroyChart
     };
 
-    var WATCHED_ATTRS = ['data-last-render', 'data-candles', 'data-volume', 'data-overlays', 'data-markers'];
+    var WATCHED_ATTRS = ['data-last-render', 'data-candles', 'data-volume', 'data-overlays', 'data-markers', 'data-meta'];
     var registry = new Map();
 
     function parseAttribute(element, attr, fallback) {
@@ -698,7 +847,8 @@
             volume: parseAttribute(element, 'data-volume', []),
             overlays: normalizeOverlayPayload(parseAttribute(element, 'data-overlays', { lines: {}, supertrend: {} })),
             markers: parseAttribute(element, 'data-markers', []),
-            chartOptions: parseAttribute(element, 'data-chart-options', {})
+            chartOptions: parseAttribute(element, 'data-chart-options', {}),
+            meta: parseAttribute(element, 'data-meta', {})
         };
     }
 

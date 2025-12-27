@@ -7,6 +7,10 @@ from QuantConnect.Algorithm.Framework.Portfolio import (
     PortfolioTarget,
 )
 from QuantConnect.Algorithm.Framework.Risk import RiskManagementModel
+from AlgorithmImports import RollingWindow
+from QuantConnect.Data.Market import TradeBar
+
+from utils.price_action_patterns import PriceActionPatterns
 
 class Strategy:
     def initialize(self, algo, indicators, config=None):
@@ -62,7 +66,12 @@ class MeanReversionAlphaModel(AlphaModel):
         self.trades_today = 0
         self.last_trade_day = None
         self._limit_notified_day = None
-        self.pattern_manager = None
+        # single candlestick pattern manager shared across alphas
+        self.candlestick_pattern_manager = None
+        # Price Action Pattern Engine and local history
+        self.price_action_manager = None
+        # RollingWindow for TradeBar history, aligned with pattern engine
+        self.candle_history_rolling_window = None
 
     def configure(self, algorithm, symbol, indicators, config):
         """Bind runtime services and align the candlestick filter parameters.
@@ -102,18 +111,32 @@ class MeanReversionAlphaModel(AlphaModel):
         self.trades_today = 0
         self.last_trade_day = None
         self._limit_notified_day = None
-        self.pattern_manager = getattr(algorithm, "pattern_tracker", None)
+        self.candlestick_pattern_manager = getattr(algorithm, "candlestick_pattern_manager", None)
+        
+        # Use the PriceActionPatterns engine initialized in Main if available
+        self.price_action_manager = getattr(algorithm, "price_action_engine", None)
+        
+        # If not available (e.g. disabled in config), we might leave it None or init a dummy?
+        # The logic below assumes it might need to init its own window.
+        
+        if self.price_action_manager:
+            # The engine is already configured with the correct window and lookback from main.py.
+            pass
+        else:
+             # Fallback if not enabled in Main but required here? 
+             pass
+
         # Delegate pattern config to the manager using the strategy constant
         # but align the timeframe with the runtime horizon so pattern checks
         # stay in sync with generated insights.
-        if self.pattern_manager and hasattr(self.pattern_manager, "apply_filter_config"):
+        if self.candlestick_pattern_manager and hasattr(self.candlestick_pattern_manager, "apply_filter_config"):
             try:
                 dynamic_minutes = max(1, forward_minutes)
                 filter_cfg = dict(self.CANDLESTICK_FILTER_CONFIG)
                 filter_cfg["timeframe_minutes"] = dynamic_minutes
                 if "within_minutes" not in filter_cfg and "lookback_minutes" not in filter_cfg:
                     filter_cfg["within_minutes"] = dynamic_minutes
-                self.pattern_manager.apply_filter_config(filter_cfg)
+                self.candlestick_pattern_manager.apply_filter_config(filter_cfg)
             except Exception:
                 if self.algorithm:
                     self.algorithm.Debug(
@@ -165,6 +188,23 @@ class MeanReversionAlphaModel(AlphaModel):
         if bar is None:
             return []
 
+        # Maintain local TradeBar history for price action pattern analysis.
+        if self.price_action_manager is not None and isinstance(bar, TradeBar):
+            self.price_action_manager.add_trade_bar(bar)
+
+        #price Action pattern filter
+        #Pattern Calculation (Only if sufficient sample size N exists)
+        if (
+            self.price_action_manager is not None
+            and self.price_action_manager.is_ready()
+        ):
+            patterns_detected = self.price_action_manager.calculate_double_tops()
+            if len(patterns_detected) > 0:
+                self.algorithm.Debug(
+                    f"MeanReversionAlphaModel: detected patterns at {getattr(bar, 'EndTime', 'N/A')}: {patterns_detected}"
+                )
+        # If the geometric conditions imply a reversal or continuation:
+        return []
         security = algorithm.Securities.get(self.symbol) if hasattr(algorithm, "Securities") else None
         holding_qty = security.Holdings.Quantity if security and security.Holdings else 0
         if holding_qty <= 0:
@@ -209,8 +249,8 @@ class MeanReversionAlphaModel(AlphaModel):
                 self.current_direction = InsightDirection.Flat
         #chart pattern filter
         pattern_ok = True
-        if self.pattern_manager:
-            pattern_ok = self.pattern_manager.filter_passes()
+        if self.candlestick_pattern_manager:
+            pattern_ok = self.candlestick_pattern_manager.filter_passes()
             if self.algorithm and pattern_ok:
                 self.algorithm.Debug(
                     f"MeanReversionAlphaModel: pattern_ok={pattern_ok} at {getattr(bar, 'EndTime', 'N/A')}"

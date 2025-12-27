@@ -223,7 +223,12 @@ def get_chart_series(series_map: dict, chart_prefix: str) -> dict:
     return result
 
  #transform helpers for lightweight-charts
-def _timestamp_to_epoch_seconds(value: Any, assume_timezone: Optional[str] = None) -> Optional[int]:
+def _timestamp_to_epoch_seconds(
+    value: Any,
+    assume_timezone: Optional[str] = None,
+    *,
+    preserve_wall_time: bool = False
+) -> Optional[int]:
     """Return Unix epoch seconds for the supplied timestamp.
 
     Parameters
@@ -232,6 +237,10 @@ def _timestamp_to_epoch_seconds(value: Any, assume_timezone: Optional[str] = Non
         Original timestamp value from a pandas index or column.
     assume_timezone : str, optional
         Timezone name to assume when ``value`` is naive (no ``tzinfo``).
+    preserve_wall_time : bool, optional
+        When ``True`` and ``assume_timezone`` is provided, encode the epoch so
+        the resulting clock time matches the configured timezone instead of
+        converting to UTC.
     """
     if value is None or (isinstance(value, float) and np.isnan(value)):
         return None
@@ -257,7 +266,24 @@ def _timestamp_to_epoch_seconds(value: Any, assume_timezone: Optional[str] = Non
             timestamp = timestamp.tz_convert(assume_timezone)
         except Exception:
             pass
-    timestamp = timestamp.tz_convert('UTC')
+
+    if preserve_wall_time and assume_timezone:
+        try:
+            local_view = timestamp.tz_convert(assume_timezone)
+        except Exception:
+            local_view = timestamp
+        try:
+            naive_local = local_view.tz_localize(None)
+            pseudo_utc = naive_local.tz_localize('UTC')
+            return int(pseudo_utc.timestamp())
+        except Exception:
+            pass
+
+    try:
+        timestamp = timestamp.tz_convert('UTC')
+    except Exception:
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.tz_localize('UTC')
     return int(timestamp.timestamp())
 
 
@@ -292,6 +318,88 @@ def _timestamp_to_iso8601(value: Any, assume_timezone: Optional[str] = None) -> 
     timestamp = timestamp.tz_localize(None)
     return timestamp.isoformat()
 
+
+def _infer_timezone_offset(index: Optional[pd.Index], timezone: Optional[str]) -> Optional[int]:
+    """Best-effort computation of the timezone offset in seconds."""
+    if not timezone:
+        return None
+    sample = None
+    if index is not None:
+        try:
+            if len(index):
+                sample = index[0]
+        except Exception:
+            sample = None
+    if sample is None:
+        sample = pd.Timestamp.utcnow()
+    try:
+        ts = pd.to_datetime(sample, errors='coerce')
+    except Exception:
+        return None
+    if ts is pd.NaT or pd.isna(ts):
+        return None
+    if ts.tzinfo is None:
+        ts = ts.tz_localize('UTC')
+    else:
+        ts = ts.tz_convert('UTC')
+    try:
+        localized = ts.tz_convert(timezone)
+    except Exception:
+        return None
+    offset = localized.utcoffset()
+    if offset is None:
+        return None
+    return int(offset.total_seconds())
+
+
+def _format_timezone_label(timezone: Optional[str], offset_seconds: Optional[int]) -> Optional[str]:
+    """Return a readable label such as ``Asia/Kolkata (UTC+05:30)``."""
+    if timezone is None and offset_seconds is None:
+        return None
+    offset_label = _format_offset_label(offset_seconds)
+    if timezone and offset_label:
+        return f"{timezone} ({offset_label})"
+    return timezone or offset_label
+
+
+def _format_offset_label(offset_seconds: Optional[int]) -> Optional[str]:
+    if offset_seconds is None:
+        return None
+    sign = '+' if offset_seconds >= 0 else '-'
+    abs_seconds = abs(offset_seconds)
+    hours, remainder = divmod(abs_seconds, 3600)
+    minutes = remainder // 60
+    return f"UTC{sign}{hours:02d}:{minutes:02d}"
+
+
+def _collect_trading_days(price_df: Optional[pd.DataFrame], assume_timezone: Optional[str]) -> List[str]:
+    """Return sorted ``YYYY-MM-DD`` strings for days represented in ``price_df``."""
+    if price_df is None or price_df.empty:
+        return []
+    index = getattr(price_df, 'index', None)
+    if not isinstance(index, pd.DatetimeIndex):
+        return []
+    idx = index.copy()
+    if assume_timezone:
+        try:
+            if idx.tz is None:
+                idx = idx.tz_localize(assume_timezone)
+            else:
+                idx = idx.tz_convert(assume_timezone)
+        except Exception:
+            try:
+                idx = idx.tz_localize('UTC') if idx.tz is None else idx.tz_convert('UTC')
+            except Exception:
+                return []
+    else:
+        try:
+            idx = idx.tz_localize('UTC') if idx.tz is None else idx.tz_convert('UTC')
+        except Exception:
+            return []
+    normalized = idx.normalize()
+    unique_days = pd.unique(normalized)
+    return [pd.Timestamp(day).strftime('%Y-%m-%d') for day in unique_days if not pd.isna(day)]
+
 #transform helpers for lightweight-charts
 def _to_float(value: Any) -> Optional[float]:
     """Safely coerce a scalar to ``float`` while tolerating missing values."""
@@ -308,20 +416,34 @@ def _to_float(value: Any) -> Optional[float]:
         return None
 
  #transform helpers for lightweight-charts
-def build_lightweight_price_payload(price_df: Optional[pd.DataFrame], assume_timezone: Optional[str] = None) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+def build_lightweight_price_payload(
+    price_df: Optional[pd.DataFrame],
+    assume_timezone: Optional[str] = None
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
     """Transform ``price_df`` into lightweight-charts candle and volume arrays.
 
-    Used by the TradingView-based dashboard.
+    Used by the TradingView-based dashboard. Returns candle data, volume data,
+    and a metadata dictionary describing timezone handling.
     """
     candles: List[Dict[str, Any]] = []
     volume: List[Dict[str, Any]] = []
+    metadata: Dict[str, Any] = {
+        'timezone': assume_timezone,
+        'timeMode': 'wall-clock' if assume_timezone else 'utc',
+        'wallTimeEpoch': bool(assume_timezone)
+    }
     if price_df is None or price_df.empty:
-        return candles, volume
+        return candles, volume, metadata
 
     has_volume = 'volume' in price_df.columns
+    preserve_wall_time = bool(assume_timezone)
 
     for idx, row in price_df.iterrows():
-        epoch_time = _timestamp_to_epoch_seconds(idx, assume_timezone)
+        epoch_time = _timestamp_to_epoch_seconds(
+            idx,
+            assume_timezone,
+            preserve_wall_time=preserve_wall_time
+        )
         if epoch_time is None:
             continue
 
@@ -361,7 +483,20 @@ def build_lightweight_price_payload(price_df: Optional[pd.DataFrame], assume_tim
                     'color': color
                 })
 
-    return candles, volume
+    offset_seconds = _infer_timezone_offset(getattr(price_df, 'index', None), assume_timezone)
+    offset_label = _format_offset_label(offset_seconds)
+    if offset_seconds is not None:
+        metadata['timezoneOffsetSeconds'] = offset_seconds
+    if offset_label:
+        metadata['timezoneOffsetLabel'] = offset_label
+    timezone_label = _format_timezone_label(assume_timezone, offset_seconds)
+    if timezone_label:
+        metadata['timezoneLabel'] = timezone_label
+    trading_days = _collect_trading_days(price_df, assume_timezone)
+    if trading_days:
+        metadata['tradingDays'] = trading_days
+
+    return candles, volume, metadata
 
  #transform helpers for lightweight-charts
 def _series_to_lightweight(series: Optional[pd.Series], assume_timezone: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -370,8 +505,13 @@ def _series_to_lightweight(series: Optional[pd.Series], assume_timezone: Optiona
     if series is None:
         return payload
     numeric = pd.to_numeric(series, errors='coerce')
+    preserve_wall_time = bool(assume_timezone)
     for idx, value in numeric.dropna().items():
-        epoch_time = _timestamp_to_epoch_seconds(idx, assume_timezone)
+        epoch_time = _timestamp_to_epoch_seconds(
+            idx,
+            assume_timezone,
+            preserve_wall_time=preserve_wall_time
+        )
         scalar = _to_float(value)
         if epoch_time is not None and scalar is not None:
             payload.append({'time': epoch_time, 'value': scalar})
@@ -505,9 +645,18 @@ def build_lightweight_markers(trades_df: Optional[pd.DataFrame], assume_timezone
     if 'exitPrice' in df.columns:
         df['exitPrice'] = pd.to_numeric(df['exitPrice'], errors='coerce')
 
+    preserve_wall_time = bool(assume_timezone)
     for _, row in df.iterrows():
-        entry_time_epoch = _timestamp_to_epoch_seconds(row.get('entryTime'), assume_timezone)
-        exit_time_epoch = _timestamp_to_epoch_seconds(row.get('exitTime'), assume_timezone)
+        entry_time_epoch = _timestamp_to_epoch_seconds(
+            row.get('entryTime'),
+            assume_timezone,
+            preserve_wall_time=preserve_wall_time
+        )
+        exit_time_epoch = _timestamp_to_epoch_seconds(
+            row.get('exitTime'),
+            assume_timezone,
+            preserve_wall_time=preserve_wall_time
+        )
 
         quantity = _to_float(row.get('quantity')) or _to_float(row.get('quantityFilled'))
         symbol = row.get('symbol') or row.get('symbolId')

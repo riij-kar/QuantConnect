@@ -665,6 +665,20 @@ def list_backtests(project_path: str):
             summary_json = cand
             break
         label = os.path.basename(f)
+        symbol_value = None
+
+        # Prefer symbol from *-order-events.json (array of objects; use first object)
+        try:
+            for cand in glob.glob(os.path.join(f, '*-order-events.json')):
+                order_events = json.load(open(cand, 'r'))
+                if isinstance(order_events, list) and order_events:
+                    first_event = order_events[0]
+                    if isinstance(first_event, dict):
+                        symbol_value = first_event.get('symbolValue')
+                break
+        except Exception:
+            symbol_value = None
+
         if summary_json:
             try:
                 data = json.load(open(summary_json, 'r'))
@@ -674,6 +688,9 @@ def list_backtests(project_path: str):
                 label = f"{label} | Net: {net} | Trades: {trades}"
             except Exception:
                 pass
+
+        if symbol_value:
+            label = f"{label} | {symbol_value}"
         options.append({"label": label, "value": f})
     return options
 
@@ -1976,6 +1993,7 @@ def update_backtests(project_path):
     Output('tradingview-price-volume', 'data-volume'),
     Output('tradingview-price-volume', 'data-overlays'),
     Output('tradingview-price-volume', 'data-markers'),
+    Output('tradingview-price-volume', 'data-meta'),
     Output('indicator-legend', 'children'),
     Output('indicator-echarts-panel', 'data-config'),
     Output('indicator-echarts-panel', 'data-last-render'),
@@ -2009,10 +2027,15 @@ def update_visual(backtest_folder, _resample_clicks, entry_exit_visible, resampl
             'resampleValue': None,
             'resampleUnit': None,
             'priceSource': None,
-            'timezone': None
+            'timezone': None,
+            'timeMode': 'utc',
+            'wallTimeEpoch': False,
+            'timezoneLabel': None,
+            'timezoneOffsetSeconds': None
         }
     }
     empty_overlays_json = json.dumps({'lines': {}, 'supertrend': {}, 'legend': []})
+    empty_meta_json = json.dumps(empty_payload['meta'])
     if not backtest_folder:
         empty_json = json.dumps([])
         empty_config = json.dumps({'oscillators': [], 'performance': {}, 'analytics': []})
@@ -2022,6 +2045,7 @@ def update_visual(backtest_folder, _resample_clicks, entry_exit_visible, resampl
             empty_json,
             empty_overlays_json,
             empty_json,
+            empty_meta_json,
             [],
             empty_config,
             '',
@@ -2247,7 +2271,7 @@ def update_visual(backtest_folder, _resample_clicks, entry_exit_visible, resampl
             'height': entry.get('height')
         })
 
-    candles, volume_payload = build_lightweight_price_payload(price_df, assume_timezone=ui_timezone)
+    candles, volume_payload, price_meta = build_lightweight_price_payload(price_df, assume_timezone=ui_timezone)
     overlay_payload = build_lightweight_overlay_payload(indicator_bundle.overlays, assume_timezone=ui_timezone)
     markers = build_lightweight_markers(trades_for_markers if show_entry_exit else None, assume_timezone=ui_timezone)
     legend_children = _build_indicator_legend(overlay_payload.get('legend', []))
@@ -2310,20 +2334,24 @@ def update_visual(backtest_folder, _resample_clicks, entry_exit_visible, resampl
             style={'color':'#664d03','background':'#fff9db','border':'1px solid #ffe58f','padding':'4px 8px','margin':'6px 0','borderRadius':'4px'}
         ))
 
+    tv_meta = {
+        'resolution': freq_label,
+        'resampleValue': freq_value,
+        'resampleUnit': freq_unit,
+        'priceSource': price_source_note,
+        'timezone': ui_timezone,
+        'entryExitEnabled': show_entry_exit,
+        'hasPriceData': bool(price_df is not None and not price_df.empty)
+    }
+    if price_meta:
+        tv_meta.update({k: v for k, v in price_meta.items() if v is not None})
+
     tv_payload = {
         'candles': candles,
         'volume': volume_payload,
         'markers': markers,
         'overlays': overlay_payload,
-        'meta': {
-            'resolution': freq_label,
-            'resampleValue': freq_value,
-            'resampleUnit': freq_unit,
-            'priceSource': price_source_note,
-            'timezone': ui_timezone,
-            'entryExitEnabled': show_entry_exit,
-            'hasPriceData': bool(price_df is not None and not price_df.empty)
-        }
+        'meta': tv_meta
     }
     render_token = datetime.utcnow().isoformat() + 'Z'
     echarts_render_token = render_token + '-ech'
@@ -2331,6 +2359,7 @@ def update_visual(backtest_folder, _resample_clicks, entry_exit_visible, resampl
     json_volume = json.dumps(volume_payload)
     json_overlays = json.dumps(overlay_payload)
     json_markers = json.dumps(markers)
+    json_meta = json.dumps(tv_meta)
 
     # trades table
     if not trades_df.empty:
@@ -2376,6 +2405,7 @@ def update_visual(backtest_folder, _resample_clicks, entry_exit_visible, resampl
         json_volume,
         json_overlays,
         json_markers,
+        json_meta,
         legend_children,
         json_echarts,
         echarts_render_token,

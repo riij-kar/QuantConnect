@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import pandas as pd
+from pandas.api.types import is_datetime64_any_dtype, is_datetime64tz_dtype
 from pandas.tseries.frequencies import to_offset
 
 __all__ = [
@@ -24,8 +25,8 @@ class _UnitConfig:
 
 
 RESAMPLE_UNITS: dict[str, _UnitConfig] = {
-    "minute": _UnitConfig(code="T", label="minute"),
-    "hour": _UnitConfig(code="H", label="hour"),
+    "minute": _UnitConfig(code="min", label="minute"),
+    "hour": _UnitConfig(code="h", label="hour"),
     "day": _UnitConfig(code="D", label="day"),
     "month": _UnitConfig(code="M", label="month"),
 }
@@ -61,6 +62,13 @@ def frequency_to_timedelta(value: int, unit: str) -> Optional[pd.Timedelta]:
         config = RESAMPLE_UNITS[unit]
     except KeyError:
         return None
+
+    if config.code in {"min", "h", "D"}:
+        try:
+            return pd.to_timedelta(value, unit=config.code)
+        except Exception:
+            return None
+
     try:
         offset = to_offset(f"{value}{config.code}")
     except Exception:
@@ -83,6 +91,33 @@ def frequency_to_timedelta(value: int, unit: str) -> Optional[pd.Timedelta]:
     return None
 
 
+def _infer_session_offset(index: pd.DatetimeIndex) -> Optional[pd.Timedelta]:
+    """Infer the most common intraday offset of the first print per session."""
+    if index is None or index.empty:
+        return None
+    try:
+        normalized = index.normalize()
+        first_by_day = pd.Series(index, index=normalized).groupby(level=0).min()
+    except Exception:
+        return None
+    if first_by_day.empty:
+        return None
+    deltas = (first_by_day - first_by_day.index).dropna()
+    if deltas.empty:
+        return None
+    try:
+        mode = deltas.mode()
+        if not mode.empty:
+            return pd.to_timedelta(mode.iloc[0])
+    except Exception:
+        mode = None
+    try:
+        return pd.to_timedelta(deltas.median())
+    except Exception:
+        return None
+
+
+
 def resample_ohlcv(df: Optional[pd.DataFrame], value: Optional[int | float | str], unit: Optional[str]) -> Optional[pd.DataFrame]:
     """Resample an OHLC(V) DataFrame to a new frequency.
 
@@ -100,8 +135,21 @@ def resample_ohlcv(df: Optional[pd.DataFrame], value: Optional[int | float | str
         return df
 
     freq_code = f"{freq_value}{config.code}"
+    tz_info = df.index.tz
+    working = df.copy()
+    working['__bucket_first_ts'] = working.index
+
+    session_offset = _infer_session_offset(working.index)
+    alignable_units = {"minute", "hour", "day"}
+    freq_delta = frequency_to_timedelta(freq_value, freq_unit)
+    use_groupby_grid = (
+        session_offset is not None
+        and freq_unit in alignable_units
+        and freq_delta is not None
+    )
+
     # Determine aggregation map dynamically so we can handle close-only data.
-    columns = {c.lower(): c for c in df.columns}
+    columns = {c.lower(): c for c in working.columns}
     has = lambda name: name in columns
 
     agg: dict[str, str] = {}
@@ -115,14 +163,21 @@ def resample_ohlcv(df: Optional[pd.DataFrame], value: Optional[int | float | str
         agg[columns["close"]] = "last"
     if has("volume"):
         agg[columns["volume"]] = "sum"
+    agg['__bucket_first_ts'] = 'first'
 
     if not agg:
         return df
 
     try:
-        resampled = df.resample(freq_code, label="right", closed="right").agg(agg)
+        if use_groupby_grid:
+            bucket_labels = (working.index - session_offset).floor(freq_code) + session_offset
+            resampled = working.groupby(bucket_labels).agg(agg)
+        else:
+            resampled = working.resample(freq_code, label="right", closed="right").agg(agg)
     except Exception:
         return df
+
+    bucket_first = resampled.pop('__bucket_first_ts') if '__bucket_first_ts' in resampled.columns else None
 
     # Insert NaNs for periods with no data to avoid drawing flat lines across breaks.
     resampled = resampled.where(~resampled.isna(), other=resampled)
@@ -130,8 +185,37 @@ def resample_ohlcv(df: Optional[pd.DataFrame], value: Optional[int | float | str
     # Drop any bars where we failed to compute a closing value to avoid flat segments.
     close_col = columns.get("close")
     if close_col in resampled.columns:
-        resampled = resampled.dropna(subset=[close_col])
+        valid_mask = resampled[close_col].notna()
     else:
-        resampled = resampled.dropna(how="all")
+        valid_mask = ~resampled.isna().all(axis=1)
+
+    if bucket_first is not None:
+        valid_mask = valid_mask & bucket_first.notna()
+
+    resampled = resampled.loc[valid_mask]
+    if bucket_first is not None:
+        bucket_first = bucket_first.loc[valid_mask]
+
+    bucket_times: Optional[pd.Series] = None
+    if (not use_groupby_grid) and bucket_first is not None and not bucket_first.empty:
+        try:
+            if is_datetime64_any_dtype(bucket_first):
+                bucket_times = bucket_first
+                if tz_info is not None and not is_datetime64tz_dtype(bucket_first):
+                    bucket_times = bucket_times.dt.tz_localize(tz_info)
+            else:
+                bucket_times = pd.to_datetime(bucket_first)
+                if tz_info is not None and not is_datetime64tz_dtype(bucket_times):
+                    bucket_times = bucket_times.dt.tz_localize(tz_info)
+        except Exception:
+            bucket_times = None
+
+    if bucket_times is not None and not bucket_times.empty:
+        try:
+            resampled.index = bucket_times
+        except Exception:
+            pass
+
+    resampled.index.name = df.index.name
 
     return resampled

@@ -53,6 +53,7 @@ class PriceVolumeChart(html.Div):
             'data-overlays': json.dumps(overlays or {'lines': {}, 'supertrend': {}, 'legend': []}),
             'data-markers': json.dumps(list(markers) if markers else []),
             'data-chart-options': json.dumps(chart_options or {}),
+            'data-meta': json.dumps({}),
             'data-last-render': '',
             'data-component': 'price-volume-chart',
             'style': {
